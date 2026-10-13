@@ -868,7 +868,6 @@ wheels = [
 
 [[package]]
 name = "weather-skills-core"
-version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "cf-xarray" },

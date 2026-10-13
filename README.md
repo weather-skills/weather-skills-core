@@ -16,7 +16,7 @@ checked in; nothing is generated at runtime unless you want it to be.
 
 ![Composable weather skills: fetchers write a standard Zarr, transforms take Zarr to Zarr, and a figure skill writes a PNG](docs/composable-skills.svg)
 
-A pipeline from the [weather-skills](https://github.com/rhiza-research/weather-skills)
+A pipeline from the [weather-skills](https://github.com/weather-skills/weather-skills-catalog)
 collection — weekly CHIRPS rainfall totals over Kenya:
 
 ```bash
@@ -65,14 +65,14 @@ The authoring guide covers the rest:
 ## Install
 
 ```bash
-uv add "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core"
+uv add weather-skills-core
 ```
 
 ## Development
 
 This repository is the core library (`weather_skills_core`) and the tools
 for writing skills. The skills themselves live in companion collections such
-as [weather-skills](https://github.com/rhiza-research/weather-skills).
+as [weather-skills](https://github.com/weather-skills/weather-skills-catalog).
 
 ```bash
 uv sync
