@@ -51,7 +51,10 @@ def normalize_step_coord(ds, dim: str = "step"):
         return ds
     if values.dtype == np.dtype("timedelta64[ns]"):
         return ds
-    return ds.assign_coords({dim: values.astype("timedelta64[ns]")})
+    # Keep the coord's attrs (standard_name=forecast_period, long_name).
+    return ds.assign_coords(
+        {dim: (ds[dim].dims, values.astype("timedelta64[ns]"), dict(ds[dim].attrs))}
+    )
 
 
 _LATLON_DECIMALS = 5
@@ -92,8 +95,9 @@ def fill_missing_data_var_attrs(src, dst):
     """Fill attrs present on ``src`` but missing on matching ``dst`` data vars.
 
     Heals stripped metadata (regrid, etc.) without overwriting attrs a skill set.
-    Does not restore ``aggregation_period`` onto vars whose ``cell_methods``
-    already record a sum (period totals).
+    Does not restore ``aggregation_period`` or rate descriptions (``comment``,
+    ``short_name``, ``step_type``, e.g. "Average precipitation rate…", ``prate``,
+    ``avg``) onto vars whose ``cell_methods`` already record a sum (period totals).
     """
     from weather_skills_core.units import AGGREGATION_PERIOD_ATTR, cell_methods_has_sum
 
@@ -102,11 +106,11 @@ def fill_missing_data_var_attrs(src, dst):
     for name in dst.data_vars:
         if name not in src.data_vars:
             continue
-        skip_period = cell_methods_has_sum(dst[name].attrs.get("cell_methods"))
+        is_total = cell_methods_has_sum(dst[name].attrs.get("cell_methods"))
         for key, value in src[name].attrs.items():
             if key in dst[name].attrs:
                 continue
-            if skip_period and key == AGGREGATION_PERIOD_ATTR:
+            if is_total and key in (AGGREGATION_PERIOD_ATTR, "comment", "short_name", "step_type"):
                 continue
             if not dirty:
                 out = dst.copy()
@@ -158,6 +162,11 @@ def parse_bbox(bbox: str) -> tuple:
         north, west, south, east = (float(x) for x in bbox.split("/"))
     except ValueError:
         raise UsageError("--bbox must be four decimal degrees N/W/S/E.") from None
+    if not (-90 <= south <= north <= 90):
+        raise UsageError(
+            f"--bbox {bbox}: needs -90 <= S <= N <= 90 (order is N/W/S/E); "
+            "west > east is fine and crosses the antimeridian."
+        )
     return north, west, south, east
 
 
@@ -382,8 +391,14 @@ def clip_by_geometry(
         )
         if not mask.any():
             raise DataError("geometry selects no stations")
+        if drop:
+            return ds.isel({point_dim: np.nonzero(mask)[0]})
+        # NaN only the variables that run along the station axis; ds.where
+        # would broadcast the mask onto every other variable.
         keep = xr.DataArray(mask, dims=point_dim)
-        return ds.isel({point_dim: np.nonzero(mask)[0]}) if drop else ds.where(keep, drop=False)
+        return ds.assign(
+            {name: var.where(keep) for name, var in ds.data_vars.items() if point_dim in var.dims}
+        )
 
     if lat_dim is None or lon_dim is None:
         lat_dim, lon_dim = detect_spatial_dims(ds)
@@ -418,21 +433,42 @@ def clip_by_geometry(
         east = np.maximum(lon_edges[:-1], lon_edges[1:])
         south = np.minimum(lat_edges[:-1], lat_edges[1:])
         north = np.maximum(lat_edges[:-1], lat_edges[1:])
-        west2d, south2d = np.meshgrid(west, south)
-        east2d, north2d = np.meshgrid(east, north)
-        cells = shapely.box(west2d, south2d, east2d, north2d)
-        # Keep cells with a positive-area overlap (not just edge/corner touch).
-        mask = shapely.area(shapely.intersection(cells, geometry)) > 0.0
+        # Only cells inside the geometry's bounding box can overlap it; build
+        # cell boxes for that window alone, not for the whole (maybe global) grid.
+        g_west, g_south, g_east, g_north = geometry.bounds
+        rows = np.nonzero((north > g_south) & (south < g_north))[0]
+        cols = np.nonzero((east > g_west) & (west < g_east))[0]
+        mask = np.zeros((south.size, west.size), dtype=bool)
+        if rows.size and cols.size:
+            west2d, south2d = np.meshgrid(west[cols], south[rows])
+            east2d, north2d = np.meshgrid(east[cols], north[rows])
+            cells = shapely.box(west2d, south2d, east2d, north2d)
+            # Keep cells with a positive-area overlap (not just edge/corner touch).
+            mask[np.ix_(rows, cols)] = shapely.area(shapely.intersection(cells, geometry)) > 0.0
 
-    mask_da = xr.DataArray(
-        mask, dims=(lat_dim, lon_dim), coords={lat_dim: ds[lat_dim], lon_dim: ds[lon_dim]}
-    )
-    if not bool(mask_da.any()):
+    if not mask.any():
         raise DataError("geometry selects no grid cells")
-    out = ds.where(mask_da)
     if drop:
-        out = out.dropna(lat_dim, how="all").dropna(lon_dim, how="all")
-    return out
+        # Trim to the span of rows and columns the geometry touches, decided by
+        # the mask rather than the data. Rows between the parts of a
+        # MultiPolygon stay (as NaN), so the grid keeps its regular spacing,
+        # and nothing is computed.
+        rows = np.nonzero(mask.any(axis=1))[0]
+        cols = np.nonzero(mask.any(axis=0))[0]
+        rows = slice(rows[0], rows[-1] + 1)
+        cols = slice(cols[0], cols[-1] + 1)
+        ds = ds.isel({lat_dim: rows, lon_dim: cols})
+        mask = mask[rows, cols]
+    # NaN only the variables on the grid; ds.where would broadcast the mask
+    # onto every other variable (time bounds, station metadata, ...).
+    mask_da = xr.DataArray(mask, dims=(lat_dim, lon_dim))
+    return ds.assign(
+        {
+            name: var.where(mask_da)
+            for name, var in ds.data_vars.items()
+            if lat_dim in var.dims and lon_dim in var.dims
+        }
+    )
 
 
 def grid_spacing(coord_vals) -> float:
@@ -567,6 +603,8 @@ def roll_and_agg(
     """
     import numpy as np
 
+    from weather_skills_core import units  # noqa: F401  (registers the .pint accessor)
+
     if window < 1:
         raise UsageError(f"rolling window must be >= 1; got {window}")
     if window == 1 and stride is None:
@@ -578,25 +616,26 @@ def roll_and_agg(
         raise UsageError(
             f"rolling aggregation requires datetime64 or timedelta64 on {dim!r}; got dtype {dtype}"
         )
-    rolled = ds.rolling({dim: window}, min_periods=min_periods, center=False)
+    # Roll on plain numbers: pint refuses the window sum behind a mean for an
+    # offset unit (degree_Celsius), though mean/min/max of one are well defined.
+    quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
+    plain = ds.pint.dequantify() if quantified else ds
+    rolled = plain.rolling({dim: window}, min_periods=min_periods, center=False)
     fn = {"mean": rolled.mean, "max": rolled.max, "min": rolled.min}.get(method)
     if fn is None:
         raise UsageError(f"unsupported rolling method {method!r}; use mean|min|max")
-    out = fn(skipna=True)
+    out = fn(skipna=True, keep_attrs=True)
+    out = out.pint.quantify() if quantified else out
     out = out.isel({dim: slice(window - 1, None)})
     step_by_align = {"center": (window - 1) // 2, "right": 0, "left": window - 1}
     if align not in step_by_align:
         raise UsageError(f"align must be left/right/center; got {align!r}")
     step_shift = step_by_align[align]
-    # Timedelta axes: shift by steps, not calendar days.
-    if np.issubdtype(out[dim].dtype, np.timedelta64):
-        steps = np.asarray(ds[dim].values)
-        diffs = np.diff(steps.astype("timedelta64[ns]").astype(np.int64))
-        median_ns = int(np.median(diffs)) if diffs.size else 0
-        shift = np.timedelta64(step_shift * median_ns, "ns")
-    else:
-        shift = np.timedelta64(step_shift, "D")
-    out = out.assign_coords({dim: out[dim] - shift})
+    # Label each window with the original coordinate of its left/center/right
+    # sample, so uneven or sub-daily spacing is labelled exactly.
+    start = window - 1 - step_shift
+    labels = ds[dim].values[start : start + out.sizes[dim]]
+    out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
     if stride is None:
         return out
     if isinstance(stride, int):

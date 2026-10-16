@@ -115,7 +115,9 @@ def prepare_dataset_output(ds, *, first_ds=None):
     - ``step`` timedelta → ``timedelta64[ns]``
     - lat/lon coords → 5 decimal places, ``float32``
     - fill attrs stripped by geometry ops from the first input (same var names)
+    - drop CF reference attrs naming variables the output lacks
     """
+    from weather_skills_core.cf import drop_dangling_cf_refs
     from weather_skills_core.standard_utils import (
         fill_missing_data_var_attrs,
         normalize_latlon_coords,
@@ -135,6 +137,7 @@ def prepare_dataset_output(ds, *, first_ds=None):
     ds = normalize_unit_strings(ds)
     ds = stamp_precip_amounts(ds)
     ds = normalize_step_coord(ds)
+    ds = drop_dangling_cf_refs(ds)
     return normalize_latlon_coords(ds)
 
 
@@ -163,6 +166,10 @@ def write_output(value, out_path, history, first_ds):
         value.attrs = {**first_ds.attrs, **value.attrs}
     value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
+    if out_path.exists() and not out_path.is_dir():
+        raise UsageError(
+            f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
+        )
     if out_path.exists():
         shutil.rmtree(out_path)
     try:
@@ -314,7 +321,6 @@ def weather_skill(
                 "extra runtime information"
             )
 
-        has_bbox = any(arg.dest == "bbox" for arg in arguments)
         parser = argparse.ArgumentParser(
             description=fn.__doc__,
             epilog=f"skill version: {version}",
@@ -345,12 +351,18 @@ def weather_skill(
             parser.add_argument(*arg.option_strings, **kwargs)
 
         strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
+        # Options taking one value (store/append), for rewrite_negative_values.
+        value_options = {
+            opt
+            for action in parser._actions
+            if action.nargs is None
+            for opt in action.option_strings
+        }
 
         @functools.wraps(fn)
         def wrapper(argv=None):
             argv = sys.argv[1:] if argv is None else list(argv)
-            if has_bbox:
-                argv = standard_args.rewrite_bbox_argv(argv)
+            argv = standard_args.rewrite_negative_values(argv, value_options)
 
             try:
                 probing = any(

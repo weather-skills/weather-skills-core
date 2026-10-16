@@ -1,10 +1,12 @@
 """Resolve a place name to a bbox and a GeoJSON Feature.
 
-Lookup order (no network until a later step):
+Lookup order (geoBoundaries and Nominatim are the only network calls):
 
-1. Bundled Natural Earth countries — ISO3 or country name.
+1. Bundled Natural Earth countries — ISO3 or country name. The outline comes
+   from geoBoundaries ADM0 (same source as admin units); the bundled 1:110m
+   outline is the fallback when geoBoundaries is unavailable.
 2. Bundled Natural Earth groupings — continent / UN / World Bank labels
-   (``Eastern Africa``, ``Sub-Saharan Africa``, …).
+   (``Eastern Africa``, ``Sub-Saharan Africa``, …), on the 1:110m outlines.
 3. Bundled custom boxes — ``Indian Ocean basin``.
 4. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi`` or ``KEN-nairobi``.
 5. OSM Nominatim — landmarks only, via :func:`geocode_nominatim`.
@@ -15,6 +17,7 @@ Rebuild the country file with ``tools/build_countries.py``.
 from __future__ import annotations
 
 import json
+import sys
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -229,6 +232,8 @@ def _http_json(url: str, *, what: str, missing=None):
         raise DataError(f"{what} failed: HTTP {exc.code} {exc.reason}") from None
     except urllib.error.URLError as exc:
         raise DataError(f"{what} failed: {exc.reason}") from None
+    except TimeoutError:
+        raise DataError(f"{what} timed out after {_HTTP_TIMEOUT}s") from None
     if raw.startswith(b"version https://git-lfs.github.com"):
         raise DataError(
             f"{what} returned a Git LFS pointer instead of JSON; cannot download {url}."
@@ -320,14 +325,38 @@ def _slim_custom(spec: dict) -> dict:
 
 
 def _slim_country(feature: dict) -> dict:
+    """Country Feature with the geoBoundaries ADM0 outline; bundled 1:110m if unavailable.
+
+    The bundled outline is coarse (Kenya has 37 vertices, ~20 km off in places)
+    and does not share edges with the geoBoundaries admin units, so it is only
+    the fallback when geoBoundaries has no ADM0 layer or cannot be reached.
+    """
     props = feature["properties"]
+    geometry, source = feature["geometry"], "Natural Earth 1:110m"
+    try:
+        parts = []
+        for gb_feature in _admin_collection(props["iso3"], 0).get("features") or []:
+            parts.extend(_polygon_parts(gb_feature.get("geometry") or {}))
+        if parts:
+            geometry = (
+                {"type": "Polygon", "coordinates": parts[0]}
+                if len(parts) == 1
+                else {"type": "MultiPolygon", "coordinates": parts}
+            )
+            source = "geoBoundaries gbOpen ADM0"
+    except (_AdminMissing, DataError) as exc:
+        print(
+            f"Warning: using the coarse Natural Earth 1:110m outline for {props['name']}: {exc}",
+            file=sys.stderr,
+        )
     return _feature(
-        feature["geometry"],
+        geometry,
         iso3=props["iso3"],
         name=props["name"],
         region_name=clean_region_name(props["name"]),
         level="country",
         country=props["name"],
+        boundary_source=source,
     )
 
 
@@ -568,6 +597,8 @@ def geocode_nominatim(query: str) -> dict:
         level="nominatim",
         country=None,
         display_name=display,
+        osm_category=hit.get("category"),
+        osm_type=hit.get("type"),
         bbox=[north, west, south, east],
     )
 

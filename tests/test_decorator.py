@@ -17,11 +17,33 @@ from weather_skills_core.provenance import (
     load_history,
     stamp_zarr,
 )
-from weather_skills_core.standard_args import rewrite_bbox_argv
+from weather_skills_core.standard_args import rewrite_negative_values
 
 
-def test_rewrite_bbox_equals_form():
-    assert rewrite_bbox_argv(["--bbox", "-10/20/-20/30"]) == ["--bbox=-10/20/-20/30"]
+def test_rewrite_negative_values():
+    opts = {"--bbox", "--point", "-o"}
+    assert rewrite_negative_values(["--bbox", "-10/20/-20/30"], opts) == ["--bbox=-10/20/-20/30"]
+    assert rewrite_negative_values(["--point", "-1.28,36.82,NBO"], opts) == [
+        "--point=-1.28,36.82,NBO"
+    ]
+    assert rewrite_negative_values(["--point", "-.5,36"], opts) == ["--point=-.5,36"]
+    # A real flag after a value option is left for argparse to report.
+    assert rewrite_negative_values(["--point", "-o", "x"], opts) == ["--point", "-o", "x"]
+    # Options not taking a value are untouched.
+    assert rewrite_negative_values(["--flag", "-1,2"], opts) == ["--flag", "-1,2"]
+
+
+def test_negative_point_parses_without_equals(tmp_path):
+    seen = {}
+
+    @weather_skill(name="pts", version="1.0.0", output=False)
+    @weather_skill.argument("--point", action="append")
+    @weather_skill.argument("--bbox")
+    def pts(point, bbox, **kwargs):
+        seen.update(point=point, bbox=bbox)
+
+    pts(["--point", "-1.28,36.82,NBO", "--point", "-4.04,39.67", "--bbox", "-3/39/-5/40"])
+    assert seen == {"point": ["-1.28,36.82,NBO", "-4.04,39.67"], "bbox": (-3.0, 39.0, -5.0, 40.0)}
 
 
 def test_parser_basic_flags():
@@ -341,6 +363,24 @@ def test_run_loop_output_kwarg_single(tmp_path):
     assert seen["output"] == out
 
 
+def test_run_loop_refuses_plain_file_output(tmp_path, capsys):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "notes.txt"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    out.write_text("keep me")
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, **kwargs):
+        return ds
+
+    with pytest.raises(SystemExit) as exc:
+        copy(["-i", str(src), "-o", str(out)])
+    assert exc.value.code == 2
+    assert "existing file, not a Zarr store" in capsys.readouterr().err
+    assert out.read_text() == "keep me"
+
+
 def test_run_loop_no_artifact(tmp_path):
     src = tmp_path / "in.zarr"
     make_gridded().to_zarr(src, mode="w", consolidated=True)
@@ -560,7 +600,7 @@ def test_run_loop_write_stamps_amount_standard_name(tmp_path):
 
     copy(["-i", str(src), "-o", str(out)])
     written = xr.open_zarr(out, consolidated=True)
-    assert written["tp"].attrs["standard_name"] == "lwe_thickness_of_precipitation_amount"
+    assert written["tp"].attrs["standard_name"] == "precipitation_amount"  # CF: kg m-2 is a mass
 
 
 def test_run_loop_write_snaps_latlon_to_float32(tmp_path):

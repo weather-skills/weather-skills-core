@@ -17,12 +17,13 @@ Dims and types: [STANDARD_DATASET.md](STANDARD_DATASET.md).
 | temp | `degree_Celsius` | Existing CF `standard_name` is kept |
 | precip (rate) | `mm day-1` | `lwe_precipitation_rate` |
 | precip (amount) | `mm` | Rate × period via totals utilities |
+| pressure | `hPa` | Sea-level and surface air pressure (`msl`, `mslp`, `prmsl`, CF `air_pressure_at_mean_sea_level`, `surface_air_pressure`); existing `standard_name` is kept |
 
 Mass precip flux (`kg m-2 s-1`) converts to a depth rate using liquid
 water density (1000 kg m⁻³). Custom pint durations: `pentad` (5 day)
 and `dekad` (10 day); week and month come from pint itself.
 
-`to_standard_units` converts a recognized temp/precip variable to the
+`to_standard_units` converts a recognized temp/precip/pressure variable to the
 table above and stamps that kind's `standard_name` when set. It leaves
 the **variable name** unchanged. Value conversion is skill-owned — the
 decorator does not call it for you.

@@ -50,6 +50,33 @@ def stamp_cf_coords(ds, *, long_names: dict | None = None):
     return ds
 
 
+def drop_dangling_cf_refs(ds):
+    """Strip CF reference attrs that name variables ``ds`` lacks.
+
+    Covers ``coordinates``, ``ancillary_variables`` and ``bounds`` (each missing
+    name is removed; an emptied attr is deleted) and ``grid_mapping`` (deleted
+    whole if any name is missing). Checks attrs and encoding of every variable,
+    so a skill that drops ``spatial_ref`` or a bounds var does not write a
+    reference to it. Returns a shallow copy.
+    """
+    ds = ds.copy()
+    for var in ds.variables.values():
+        for holder in (var.attrs, var.encoding):
+            for key in ("coordinates", "ancillary_variables", "bounds", "grid_mapping"):
+                value = holder.get(key)
+                if not isinstance(value, str):
+                    continue
+                tokens = value.split()
+                kept = [t for t in tokens if t.rstrip(":") in ds.variables]
+                if len(kept) == len(tokens):
+                    continue
+                if kept and key != "grid_mapping":
+                    holder[key] = " ".join(kept)
+                else:
+                    del holder[key]
+    return ds
+
+
 def udunits_error(units, *, catch: tuple | None = None):
     """Try parsing ``units`` with pint (CF/UDUNITS via cf_xarray.units).
 

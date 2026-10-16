@@ -173,6 +173,20 @@ def test_visualization_html(tmp_path):
     assert "weather_skills_history" in path.read_text(encoding="utf-8")
 
 
+def test_visualization_html_non_ascii_payload(tmp_path):
+    """A title like 'Rain — week 1' is JSON-escaped to \\u2014 in the payload."""
+    path = tmp_path / "x.html"
+    path.write_text("<html><head></head><body></body></html>", encoding="utf-8")
+    chain = [{**entry(), "args": {"title": "Rain \u2014 week 1", "path": "C:\\data"}}]
+    provenance.stamp_figure(path, chain)
+    assert provenance.load_figure_history(path) == chain
+    # Restamping replaces the existing meta tag through the same path.
+    chain2 = [*chain, entry()]
+    provenance.stamp_figure(path, chain2)
+    assert provenance.load_figure_history(path) == chain2
+    assert path.read_text(encoding="utf-8").count('name="weather_skills_history"') == 1
+
+
 def test_visualization_jpeg(tmp_path):
     path = tmp_path / "x.jpg"
     Image.new("RGB", (4, 4)).save(path, quality=90)

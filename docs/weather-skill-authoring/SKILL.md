@@ -34,6 +34,8 @@ One question per file:
 #   "weather-skills-core @ git+https://github.com/rhiza-research/weather-skills-core",
 # ]
 # ///
+"""Smooth a gridded Zarr over a lat/lon box and date range."""
+
 from weather_skills_core import Dataset, weather_skill
 
 # Kept in lockstep with SKILL.md metadata.version by CI; do not edit by hand.
@@ -47,7 +49,7 @@ _SKILL_VERSION = "0.1.0"
 @weather_skill.argument("--end-time", required=True)
 @weather_skill.argument("--smoothing", type=int, help="Window width.")
 def my_skill(ds, output, bbox, start_time, end_time, smoothing, **kwargs):
-    """Shown as the CLI description."""
+    """Smooth a gridded Zarr over a lat/lon box and date range."""
     return ds
 
 
@@ -118,9 +120,69 @@ set `weather_skills_source`
 precipitation as rates, and stamp native spacing
 ([UNITS.md](references/UNITS.md)).
 
+## Writing SKILL.md
+
+Agents pick a skill from its `description`, then call it from the
+`## Usage` section. Some hosts show only those two parts, so everything
+needed to run the skill lives in them.
+
+**`description`** (≤ 800 chars, usually 2–3 sentences): what the skill
+does (input → output) and when to use it, written for someone seeing it for
+the first time. Agents see every description at once and pick the most
+specific match, so do not point to other skills; when two skills look alike,
+the more specialised one says what sets it apart. Caveats, flag details, and
+pipeline rules go in Usage.
+
+**`## Usage`** (≤ 3500 chars, up to the next `##` heading):
+
+````markdown
+# my-skill
+
+One sentence on what it does.
+
+## Usage
+
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/x.py -i IN.zarr -o OUT.zarr --bbox N/W/S/E [--smoothing N]
+```
+
+### Arguments
+- `--bbox` — `N/W/S/E` decimal degrees.
+- `--smoothing` — window width in steps. Default: 1.
+
+### Output
+Dims, variables, units, and the attrs the skill stamps.
+
+### Notes
+- Only rules that change what the caller does.
+
+### Example
+```bash
+uv run ${CLAUDE_SKILL_DIR}/scripts/x.py -i chirps.zarr -o chirps_ken.zarr --bbox 5.5/33.5/-5/42.5
+```
+One line on what that produces.
+
+## Details
+
+Optional: background a caller rarely needs. Longer material (dataset
+catalogs, recipes) goes in `references/*.md`, linked from here.
+````
+
+- Describe how the skill works now, in the present tense. No history
+  ("now", "no longer", "previously", "fixed").
+- Every flag appears once under Arguments with its default; lint checks
+  both directions against the script.
+- Examples use real values (a real bbox, dates, dataset ids), not
+  placeholders.
+- Say each thing once: the body does not repeat the description.
+- The decorated function's docstring is the `--help` description: one
+  plain sentence starting with a verb, saying what the skill does, in line
+  with the `description`. The module docstring is the same sentence.
+  Implementation notes go in `#` comments.
+
 ## Checklist
 
 - Script under `scripts/`, PEP 723 block declaring `weather-skills-core`.
 - `_SKILL_VERSION` in the script matches `metadata.version` in `SKILL.md`.
-- Every flag is documented in `SKILL.md`.
+- `SKILL.md` follows [Writing SKILL.md](#writing-skillmd); every flag is under Arguments.
 - `uv run weather-skills-core lint skills/<name>` is clean.

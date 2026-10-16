@@ -389,3 +389,23 @@ def test_cf_axes_missing_custom_axes():
     ds["time"].attrs["axis"] = "T"
     assert dataset.cf_axes_missing(ds, axes=("T",)) == []
     assert dataset.cf_axes_missing(ds, axes=("Y",)) == ["Y"]
+
+
+def test_drop_dangling_cf_refs():
+    ds = make_gridded(n_time=2).assign_coords(valid_time=("time", np.zeros(2)))
+    ds["time"].attrs["bounds"] = "time_bounds"
+    ds["precip"].attrs.update(grid_mapping="spatial_ref", coordinates="valid_time spatial_ref")
+    ds["precip"].encoding["coordinates"] = "spatial_ref"
+    out = dataset.drop_dangling_cf_refs(ds)
+    assert "bounds" not in out["time"].attrs
+    assert "grid_mapping" not in out["precip"].attrs
+    assert out["precip"].attrs["coordinates"] == "valid_time"
+    assert "coordinates" not in out["precip"].encoding
+    assert ds["precip"].attrs["grid_mapping"] == "spatial_ref"  # input untouched
+
+
+def test_drop_dangling_cf_refs_keeps_present_refs():
+    ds = make_gridded(n_time=2).assign_coords(spatial_ref=0)
+    ds["precip"].attrs["grid_mapping"] = "spatial_ref: latitude longitude"
+    out = dataset.drop_dangling_cf_refs(ds)
+    assert out["precip"].attrs["grid_mapping"] == "spatial_ref: latitude longitude"
