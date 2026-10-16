@@ -216,8 +216,8 @@ def _draw_official_mark(img):
     if min(w, h) < 96:
         return img.copy()
 
-    # Compact star-only seal; ~6% of the short side.
-    diameter = max(36, min(int(min(w, h) * 0.06), 48))
+    # Compact seal; ~3.5% of the short side.
+    diameter = max(24, min(int(min(w, h) * 0.035), 28))
     stamp = _render_circular_stamp(diameter)
     margin = max(4, int(min(w, h) * 0.015))
     if stamp.width + 2 * margin > w or stamp.height + 2 * margin > h:
