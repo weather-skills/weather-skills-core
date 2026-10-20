@@ -643,6 +643,75 @@ def lookup_region(query: str) -> dict:
     )
 
 
+LEVELS = ("country", "admin_1", "admin_2", "subregion", "continent")
+
+
+def _bboxes_overlap(a, b) -> bool:
+    """True when two ``(N, W, S, E)`` boxes overlap; either may cross the antimeridian."""
+    if a[0] < b[2] or b[0] < a[2]:
+        return False
+
+    def spans(west, east):
+        return [(west, east)] if west <= east else [(west, 180.0), (-180.0, east)]
+
+    return any(
+        w1 <= e2 and w2 <= e1 for w1, e1 in spans(a[1], a[3]) for w2, e2 in spans(b[1], b[3])
+    )
+
+
+def level_features(level: str, bbox=None) -> list[dict]:
+    """Every unit at ``level`` whose extent overlaps ``bbox`` (``(N, W, S, E)``; None = world).
+
+    Levels are :data:`LEVELS`. Each Feature carries ``properties.region_name``,
+    the key :func:`lookup_region` accepts (``kenya``, ``kenya-nairobi``,
+    ``eastern_africa``), and the display ``name``. Countries and admin units
+    use the same geoBoundaries outlines as :func:`lookup_region`; subregions
+    and continents the bundled Natural Earth 1:110m outlines. Admin units are
+    fetched only for countries whose bundled outline overlaps ``bbox``. An
+    admin name that repeats within a country gets ``_2``, ``_3``, ... appended
+    to its key, so every key names one polygon.
+    """
+    if level not in LEVELS:
+        raise UsageError(f"level {level!r} is not one of {', '.join(LEVELS)}")
+    by_iso3, _ = _country_indexes()
+    countries = [
+        feature
+        for _, feature in sorted(by_iso3.items())
+        if feature.get("geometry")
+        and (bbox is None or _bboxes_overlap(bbox_from_geometry(feature["geometry"]), bbox))
+    ]
+
+    if level in ("subregion", "continent"):
+        labels = sorted({c["properties"][level] for c in countries if c["properties"].get(level)})
+        groups = {spec["name"]: spec for spec in _region_indexes().values()}
+        return [_slim_region(groups[label]) for label in labels if label in groups]
+    if level == "country":
+        return [_slim_country(c) for c in countries]
+
+    admin = int(level[-1])
+    out = []
+    for country in countries:
+        iso3 = country["properties"]["iso3"]
+        try:
+            collection = _admin_collection(iso3, admin)
+        except _AdminMissing as exc:
+            print(f"Warning: skipping {country['properties']['name']}: {exc}", file=sys.stderr)
+            continue
+        country_key = clean_region_name(country["properties"]["name"])
+        seen: dict[str, int] = {}
+        for feature in collection.get("features") or []:
+            geometry = feature.get("geometry")
+            if not geometry or (
+                bbox is not None and not _bboxes_overlap(bbox_from_geometry(geometry), bbox)
+            ):
+                continue
+            name = clean_region_name((feature.get("properties") or {}).get("shapeName", ""))
+            seen[name] = seen.get(name, 0) + 1
+            suffix = f"_{seen[name]}" if seen[name] > 1 else ""
+            out.append(_slim_admin(country, feature, admin, f"{country_key}-{name}{suffix}"))
+    return out
+
+
 def resolve_region(query: str):
     """Resolve a query to ``((N, W, S, E), GeoDataFrame)``. Needs ``[geo]`` extra."""
     import geopandas as gpd
