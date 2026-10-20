@@ -49,6 +49,7 @@ packages = ["src/weather_skills_core"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/weather_skills_core/data/countries.geojson" = "weather_skills_core/data/countries.geojson"
+"src/weather_skills_core/data/custom_regions.geojson" = "weather_skills_core/data/custom_regions.geojson"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -86,10 +86,20 @@ Lint a skill, a `skills/` tree, or a repo with `uv run weather-skills-core lint 
 
 Country polygons and Natural Earth region labels live in
 `src/weather_skills_core/data/countries.geojson`; `resolve-region` groups
-them at runtime, so names like `East Africa` need no sidecar. A few boxes
-that are not Natural Earth labels (e.g. `Indian Ocean basin`) are listed in
-`region.py`. Rebuild the country file from Natural Earth 110m admin-0 with
+them at runtime, so names like `East Africa` need no sidecar. Rebuild the
+country file from Natural Earth 110m admin-0 with
 `uv run python tools/build_countries.py` (`--help` for the contract).
+
+Named regions that are not countries, Natural Earth labels or admin units
+(e.g. `Indian Ocean basin`) live in
+`src/weather_skills_core/data/custom_regions.geojson`, so every skill that
+resolves a place name knows them. To add one, append a Feature with a
+Polygon or MultiPolygon geometry and properties `name`, `aliases` (a list,
+may be empty) and `source` (where the shape comes from). Its bbox is taken
+from the geometry. Country names and Natural Earth labels win over a custom
+name, and `tests/test_region.py` fails if a name or alias clashes with one.
+Keep this file to regions any user might ask for; project-specific boxes
+belong in a domain skill repo.
 
 Pull requests that improve the decorator, the standard dataset contract, or
 the docs are welcome. The longer-term aim is an open registry of shared
