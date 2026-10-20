@@ -357,6 +357,30 @@ def test_lookup_indian_ocean_basin_not_nominatim(monkeypatch):
         assert other["properties"]["name"] == "Indian Ocean basin"
 
 
+def test_custom_regions_file_is_well_formed():
+    """Every bundled custom region has a polygon, a source, and names no other lookup takes."""
+    import json
+    from importlib.resources import files
+
+    payload = json.loads(
+        files("weather_skills_core.data").joinpath("custom_regions.geojson").read_text()
+    )
+    _, by_clean = region_mod._country_indexes()
+    regions = region_mod._region_indexes()
+    seen = set()
+    for feature in payload["features"]:
+        props = feature["properties"]
+        assert props["name"] and props["source"]
+        assert feature["geometry"]["type"] in ("Polygon", "MultiPolygon")
+        bbox_from_geometry(feature["geometry"])
+        for alias in (props["name"], *props.get("aliases", ())):
+            cleaned = clean_region_name(alias)
+            assert cleaned not in by_clean, f"{alias!r} is a country name"
+            assert cleaned not in regions, f"{alias!r} is a Natural Earth region"
+            assert cleaned not in seen, f"{alias!r} is listed twice"
+            seen.add(cleaned)
+
+
 def test_south_africa_is_the_country_not_the_subregion():
     """South Africa matches the country, not a Natural Earth subregion of that name."""
     feature = lookup_region("South Africa")

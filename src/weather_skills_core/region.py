@@ -7,7 +7,8 @@ Lookup order (geoBoundaries and Nominatim are the only network calls):
    outline is the fallback when geoBoundaries is unavailable.
 2. Bundled Natural Earth groupings — continent / UN / World Bank labels
    (``Eastern Africa``, ``Sub-Saharan Africa``, …), on the 1:110m outlines.
-3. Bundled custom boxes — ``Indian Ocean basin``.
+3. Bundled custom regions — ``Indian Ocean basin``; one Feature each in
+   ``data/custom_regions.geojson``.
 4. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi`` or ``KEN-nairobi``.
 5. OSM Nominatim — landmarks only, via :func:`geocode_nominatim`.
 
@@ -73,21 +74,6 @@ _COUNTRY_ALIASES = {
     "falkland_islands_(uk)": "falkland_islands",
     "gaza_strip": "palestine",
     "west_bank": "palestine",
-}
-
-# Boxes that are not Natural Earth groupings or admin units.
-# ``bbox`` is (N, W, S, E). Aliases are passed through :func:`clean_region_name`.
-_CUSTOM_REGIONS = {
-    "indian_ocean_basin": {
-        "name": "Indian Ocean basin",
-        "bbox": (30.0, 20.0, -40.0, 120.0),
-        "aliases": (
-            "Indian Ocean",
-            "Indian Ocean Basin",
-            "Indian Ocean basin region",
-            "IOB",
-        ),
-    },
 }
 
 
@@ -300,26 +286,29 @@ def _region_indexes() -> dict[str, dict]:
 
 @lru_cache(maxsize=1)
 def _custom_indexes() -> dict[str, dict]:
-    """Cleaned query → bundled custom forecast box."""
+    """Cleaned name or alias → Feature from the bundled ``custom_regions.geojson``."""
+    path = files("weather_skills_core.data").joinpath("custom_regions.geojson")
+    payload = json.loads(path.read_text(encoding="utf-8"))
     by_key: dict[str, dict] = {}
-    for key, spec in _CUSTOM_REGIONS.items():
-        by_key[key] = spec
-        for alias in (spec["name"], *spec.get("aliases", ())):
+    for feature in payload["features"]:
+        props = feature["properties"]
+        for alias in (props["name"], *props.get("aliases", ())):
             cleaned = clean_region_name(alias)
             if cleaned != "no_region":
-                by_key.setdefault(cleaned, spec)
+                by_key.setdefault(cleaned, feature)
     return by_key
 
 
-def _slim_custom(spec: dict) -> dict:
-    north, west, south, east = spec["bbox"]
+def _slim_custom(feature: dict) -> dict:
+    props = feature["properties"]
+    north, west, south, east = bbox_from_geometry(feature["geometry"])
     return _feature(
-        _bbox_rectangle(north, west, south, east),
-        iso3=spec.get("iso3"),
-        name=spec["name"],
-        region_name=clean_region_name(spec["name"]),
+        feature["geometry"],
+        iso3=props.get("iso3"),
+        name=props["name"],
+        region_name=clean_region_name(props["name"]),
         level="custom",
-        country=spec.get("country"),
+        country=props.get("country"),
         bbox=[north, west, south, east],
     )
 

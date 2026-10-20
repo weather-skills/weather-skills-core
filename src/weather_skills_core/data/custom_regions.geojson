@@ -1,0 +1,44 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Indian Ocean basin",
+        "aliases": [
+          "Indian Ocean",
+            "Indian Ocean basin region",
+          "IOB"
+        ],
+        "source": "Conventional Indian Ocean basin box, 40°S–30°N, 20–120°E"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              20.0,
+              -40.0
+            ],
+            [
+              120.0,
+              -40.0
+            ],
+            [
+              120.0,
+              30.0
+            ],
+            [
+              20.0,
+              30.0
+            ],
+            [
+              20.0,
+              -40.0
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}
