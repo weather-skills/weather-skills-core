@@ -204,6 +204,24 @@ def test_visualization_jpeg(tmp_path):
     assert provenance.load_figure_history(path) == chain
 
 
+def test_visualization_gif_keeps_frames_and_timing(tmp_path):
+    path = tmp_path / "x.gif"
+    frames = [Image.new("RGB", (400, 300), color=(c, c, c)) for c in (40, 200)]
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=300, loop=0)
+    chain = [entry()]
+    provenance.stamp_figure(path, chain)
+    assert provenance.load_figure_history(path) == chain
+    with Image.open(path) as img:
+        assert img.n_frames == 2
+        assert img.info["duration"] == 300
+        assert img.info["loop"] == 0
+        # The seal sits on every frame.
+        for i in range(2):
+            img.seek(i)
+            corner = img.convert("RGB").crop((340, 250, 400, 300)).getcolors(10_000)
+            assert len(corner) > 1
+
+
 def test_visualization_png_official_mark_when_intact(tmp_path):
     path = tmp_path / "marked.png"
     Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)

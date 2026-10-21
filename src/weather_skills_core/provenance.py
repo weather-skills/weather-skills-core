@@ -376,11 +376,11 @@ def restamp_zarr(zarr_path: Path, history: list) -> None:
 
 
 def stamp_figure(path: Path, history: list) -> None:
-    """Embed ``weather_skills_history`` into a PNG, JPEG, or HTML file.
+    """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, or HTML file.
 
     When the chain is intact (non-empty and schema-valid), also draw a circular
     old-school ``weather-skills provenance verified`` rubber stamp on PNG/JPEG
-    pixels (bottom-right). HTML gets metadata only.
+    pixels and every GIF frame (bottom-right). HTML gets metadata only.
     """
     from weather_skills_core.errors import SkillError
 
@@ -417,6 +417,27 @@ def stamp_figure(path: Path, history: list) -> None:
             out.save(path, exif=exif, quality=95)
         return
 
+    if suffix == ".gif":
+        from PIL import Image, ImageSequence
+
+        # The history goes in the GIF comment block; each frame keeps its duration.
+        with Image.open(path) as img:
+            frames, durations = [], []
+            for frame in ImageSequence.Iterator(img):
+                durations.append(frame.info.get("duration", 0))
+                rgb = frame.convert("RGB")
+                frames.append(_draw_official_mark(rgb) if mark else rgb)
+            loop = img.info.get("loop", 0)
+        frames[0].save(
+            path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=loop,
+            comment=payload.encode("utf-8"),
+        )
+        return
+
     if suffix in (".html", ".htm"):
         text = path.read_text(encoding="utf-8")
         meta = f'<meta name="{HISTORY_ATTR}" content="{html.escape(payload, quote=True)}">'
@@ -434,7 +455,7 @@ def stamp_figure(path: Path, history: list) -> None:
         return
 
     raise SkillError(
-        f"unsupported figure type {suffix!r} for {path}; expected .png, .jpg/.jpeg, or .html/.htm"
+        f"unsupported figure type {suffix!r} for {path}; expected .png, .jpg/.jpeg, .gif, or .html/.htm"
     )
 
 
@@ -463,6 +484,13 @@ def load_figure_history(path: Path) -> list | None:
             else:
                 raw = raw.decode("utf-8", errors="replace")
         return coerce_chain(raw, path.name)
+
+    if suffix == ".gif":
+        from PIL import Image
+
+        with Image.open(path) as img:
+            raw = img.info.get("comment")
+        return coerce_chain(raw.decode("utf-8"), path.name) if raw else None
 
     if suffix in (".html", ".htm"):
         text = path.read_text(encoding="utf-8")
