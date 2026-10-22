@@ -711,11 +711,11 @@ def level_features(level: str, bbox=None) -> list[dict]:
     labels only, :func:`lookup_region` does not accept them. Every other key
     resolves to the same unit through :func:`lookup_region`.
 
-    All outlines come from geoBoundaries, as in :func:`lookup_region`: a
-    subregion or continent is the outlines of its member countries that
-    overlap ``bbox``, so its edges match the countries and admin units.
-    Outlines are fetched for every country in ``bbox``; above
-    ``_MANY_COUNTRIES`` a warning says so.
+    Countries and admin units use geoBoundaries outlines, as in
+    :func:`lookup_region`, fetched for every country in ``bbox``; above
+    ``_MANY_COUNTRIES`` a warning says so. Subregions and continents are the
+    bundled Natural Earth 1:50m outlines and fetch nothing, so their coasts and
+    borders can differ from the geoBoundaries units by a few km.
     """
     if level not in LEVELS:
         raise UsageError(f"level {level!r} is not one of {', '.join(LEVELS)}")
@@ -725,35 +725,22 @@ def level_features(level: str, bbox=None) -> list[dict]:
         for _, feature in sorted(by_iso3.items())
         if feature.get("geometry") and (bbox is None or _overlaps(feature["geometry"], bbox))
     ]
+    if level in ("subregion", "continent"):
+        labels = sorted({c["properties"][level] for c in countries if c["properties"].get(level)})
+        groups = {spec["name"]: spec for spec in _region_indexes().values()}
+        out = [_slim_region(groups[label]) for label in labels if label in groups]
+        for feature in out:
+            feature["properties"]["level"] = level
+        return out
+
     if len(countries) > _MANY_COUNTRIES:
         print(
             f"Warning: fetching geoBoundaries outlines for {len(countries)} countries, which can "
             "take minutes; pass a smaller bbox to fetch fewer",
             file=sys.stderr,
         )
-
     if level == "country":
         return [_slim_country(c) for c in countries]
-    if level in ("subregion", "continent"):
-        groups: dict[str, list] = {}
-        for country in countries:
-            label = country["properties"].get(level)
-            if label:
-                parts = _polygon_parts(_slim_country(country)["geometry"])
-                groups.setdefault(label, []).extend(parts)
-        return [
-            _feature(
-                {"type": "Polygon", "coordinates": parts[0]}
-                if len(parts) == 1
-                else {"type": "MultiPolygon", "coordinates": parts},
-                iso3=None,
-                name=label,
-                region_name=clean_region_name(label),
-                level=level,
-                country=None,
-            )
-            for label, parts in sorted(groups.items())
-        ]
 
     admin = int(level[-1])
     out = []

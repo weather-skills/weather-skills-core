@@ -620,19 +620,21 @@ def test_level_features_overlap_is_per_polygon(monkeypatch):
     assert "FRA" in mayotte
 
 
-def test_level_features_subregion_from_country_outlines(monkeypatch):
-    """A subregion is its member countries in the bbox, labelled with the real level."""
-    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _no_adm0)
+def test_level_features_subregion_uses_bundled_outlines(monkeypatch):
+    """A subregion is its bundled outline, fetches nothing, and carries its real level."""
+
+    def no_fetch(iso3, level):
+        raise AssertionError(f"unexpected fetch {iso3} ADM{level}")
+
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", no_fetch)
     (feature,) = level_features("subregion", (-1.0, 36.5, -1.5, 37.5))
     assert feature["properties"]["region_name"] == "eastern_africa"
     assert feature["properties"]["level"] == "subregion"
-    # Kenya's parts, and only parts of countries whose own parts overlap the bbox.
+    # The whole subregion, members outside the bbox (Ethiopia) included.
     by_iso3 = region_mod._country_indexes()[0]
-    kenya = region_mod._polygon_parts(by_iso3["KEN"]["geometry"])
-    ethiopia = region_mod._polygon_parts(by_iso3["ETH"]["geometry"])
     parts = region_mod._polygon_parts(feature["geometry"])
-    assert all(part in parts for part in kenya)
-    assert not any(part in parts for part in ethiopia)
+    for iso3 in ("KEN", "ETH"):
+        assert all(p in parts for p in region_mod._polygon_parts(by_iso3[iso3]["geometry"]))
 
 
 def test_level_features_warns_on_many_countries(monkeypatch, capsys):
