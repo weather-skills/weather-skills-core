@@ -648,28 +648,24 @@ LEVELS = ("country", "admin_1", "admin_2", "subregion", "continent")
 _MANY_COUNTRIES = 60
 
 
-def _bboxes_overlap(a, b) -> bool:
-    """True when two ``(N, W, S, E)`` boxes overlap; either may cross the antimeridian."""
-    if a[0] < b[2] or b[0] < a[2]:
-        return False
-
-    def spans(west, east):
-        return [(west, east)] if west <= east else [(west, 180.0), (-180.0, east)]
-
-    return any(
-        w1 <= e2 and w2 <= e1 for w1, e1 in spans(a[1], a[3]) for w2, e2 in spans(b[1], b[3])
-    )
-
-
 def _overlaps(geometry: dict, bbox) -> bool:
-    """True when any polygon of ``geometry`` overlaps ``bbox``.
+    """True when any polygon of ``geometry`` overlaps ``bbox`` (``(N, W, S, E)``).
 
     Part by part: France's outline holds Réunion, so its whole box spans the globe.
+    A box with west > east crosses 180° and is two longitude spans.
     """
-    return any(
-        _bboxes_overlap(bbox_from_geometry({"type": "Polygon", "coordinates": part}), bbox)
-        for part in _polygon_parts(geometry)
-    )
+    north, west, south, east = bbox
+    spans = [(west, east)] if west <= east else [(west, 180.0), (-180.0, east)]
+    for part in _polygon_parts(geometry):
+        n, w, s, e = bbox_from_geometry({"type": "Polygon", "coordinates": part})
+        part_spans = [(w, e)] if w <= e else [(w, 180.0), (-180.0, e)]
+        if (
+            n >= south
+            and s <= north
+            and any(w1 <= e2 and w2 <= e1 for w1, e1 in spans for w2, e2 in part_spans)
+        ):
+            return True
+    return False
 
 
 def _parent_names(iso3: str, features: list[dict]) -> list[str | None]:
