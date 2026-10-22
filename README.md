@@ -87,7 +87,7 @@ Lint a skill, a `skills/` tree, or a repo with `uv run weather-skills-core lint 
 Country polygons and Natural Earth region labels live in
 `src/weather_skills_core/data/countries.geojson`; `resolve-region` groups
 them at runtime, so names like `East Africa` need no sidecar. Rebuild the
-country file from Natural Earth 110m admin-0 with
+country file from Natural Earth 50m admin-0 with
 `uv run python tools/build_countries.py` (`--help` for the contract).
 
 Named regions that are not countries, Natural Earth labels or admin units

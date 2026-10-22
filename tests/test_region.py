@@ -1,5 +1,7 @@
 """Tests for region resolution (ISO3, country name, admin-1/admin-2)."""
 
+import sys
+
 import pytest
 
 from weather_skills_core import region as region_mod
@@ -154,8 +156,8 @@ def test_country_outline_falls_back_with_warning(monkeypatch, capsys):
 
     monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", unreachable)
     feature = lookup_region("KEN")
-    assert feature["properties"]["boundary_source"] == "Natural Earth 1:110m"
-    assert "coarse Natural Earth 1:110m outline for Kenya" in capsys.readouterr().err
+    assert feature["properties"]["boundary_source"] == "Natural Earth 1:50m"
+    assert "coarse Natural Earth 1:50m outline for Kenya" in capsys.readouterr().err
 
 
 def test_resolve_by_name_case_insensitive():
@@ -549,3 +551,92 @@ def test_level_features_antimeridian_bbox():
 def test_level_features_unknown_level():
     with pytest.raises(UsageError, match="admin_1"):
         level_features("county")
+
+
+def _square(west, south, size=1.0):
+    ring = [[west, south], [west + size, south], [west + size, south + size], [west, south + size]]
+    return {"type": "Polygon", "coordinates": [[*ring, ring[0]]]}
+
+
+def _unit(name, geometry):
+    return {"type": "Feature", "properties": {"shapeName": name}, "geometry": geometry}
+
+
+# Two admin_1 units, each holding an admin_2 "Central"; admin_2 "Kiambu" shares its
+# admin_1's name.
+_TWO_COUNTIES = {
+    1: [_unit("Kiambu", _square(36.0, -1.5, 2.0)), _unit("Meru", _square(38.0, -1.5, 2.0))],
+    2: [
+        _unit("Central", _square(36.2, -1.3)),
+        _unit("Kiambu", _square(36.8, -0.3)),
+        _unit("Central", _square(38.5, -1.0)),
+    ],
+}
+
+
+def _fake_two_counties(iso3, level):
+    if iso3 != "KEN" or level not in _TWO_COUNTIES:
+        raise region_mod._AdminMissing("offline test")
+    return {"type": "FeatureCollection", "features": _TWO_COUNTIES[level]}
+
+
+def test_level_features_admin2_keys_name_their_admin1(monkeypatch):
+    """admin_2 keys are country-admin1-admin2 and lookup_region resolves each to its unit."""
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _fake_two_counties)
+    features = level_features("admin_2", (1.0, 35.5, -2.0, 40.0))
+    keys = [f["properties"]["region_name"] for f in features]
+    assert keys == ["kenya-kiambu-central", "kenya-kiambu-kiambu", "kenya-meru-central"]
+    for feature in features:
+        found = lookup_region(feature["properties"]["region_name"])
+        assert found["properties"]["level"] == "admin_2"
+        assert found["geometry"] == feature["geometry"]
+
+
+def test_level_features_admin2_needs_shapely(monkeypatch):
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _fake_two_counties)
+    monkeypatch.setitem(sys.modules, "shapely", None)
+    with pytest.raises(UsageError, match=r"weather-skills-core\[geo\]"):
+        level_features("admin_2", (1.0, 35.5, -2.0, 40.0))
+
+
+def test_bundled_countries_include_small_states():
+    """The 1:50m country file holds island states the 1:110m file left out."""
+    by_iso3, _ = region_mod._country_indexes()
+    assert {"MUS", "SYC", "COM", "CPV", "STP", "MDV"} <= set(by_iso3)
+
+
+def _no_adm0(iso3, level):
+    raise region_mod._AdminMissing("offline test")
+
+
+def test_level_features_overlap_is_per_polygon(monkeypatch):
+    """France's outline holds Mayotte: France is in a Mayotte box, not in a Kenya box."""
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _no_adm0)
+    kenya = {f["properties"]["iso3"] for f in level_features("country", (5.0, 34.0, -4.0, 41.0))}
+    mayotte = {
+        f["properties"]["iso3"] for f in level_features("country", (-12.6, 44.9, -13.1, 45.4))
+    }
+    assert "FRA" not in kenya
+    assert "FRA" in mayotte
+
+
+def test_level_features_subregion_from_country_outlines(monkeypatch):
+    """A subregion is its member countries in the bbox, labelled with the real level."""
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _no_adm0)
+    (feature,) = level_features("subregion", (-1.0, 36.5, -1.5, 37.5))
+    assert feature["properties"]["region_name"] == "eastern_africa"
+    assert feature["properties"]["level"] == "subregion"
+    # Kenya's parts, and only parts of countries whose own parts overlap the bbox.
+    by_iso3 = region_mod._country_indexes()[0]
+    kenya = region_mod._polygon_parts(by_iso3["KEN"]["geometry"])
+    ethiopia = region_mod._polygon_parts(by_iso3["ETH"]["geometry"])
+    parts = region_mod._polygon_parts(feature["geometry"])
+    assert all(part in parts for part in kenya)
+    assert not any(part in parts for part in ethiopia)
+
+
+def test_level_features_warns_on_many_countries(monkeypatch, capsys):
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _no_adm0)
+    monkeypatch.setattr("weather_skills_core.region._MANY_COUNTRIES", 2)
+    level_features("country", (5.0, 34.0, -4.0, 41.0))
+    assert "fetching geoBoundaries outlines for" in capsys.readouterr().err

@@ -8,13 +8,15 @@ not on the library hot path — run it when Natural Earth updates, or when
 the slim property set changes.
 
 Source
-    Natural Earth 1:110m admin-0
+    Natural Earth 1:50m admin-0 (the 1:110m file leaves out small countries
+    such as Mauritius, Seychelles and Comoros)
     https://github.com/nvkelso/natural-earth-vector
-    `geojson/ne_110m_admin_0_countries.geojson` on `master`
+    `geojson/ne_50m_admin_0_countries.geojson` on `master`
 
 Writes
     `src/weather_skills_core/data/countries.geojson` — one Feature per
-    country, sorted by iso3. Geometry is copied from Natural Earth. Properties
+    country, sorted by iso3. Geometry is copied from Natural Earth with
+    coordinates rounded to 4 decimals (~11 m), which keeps the file ~2 MB. Properties
     kept:
 
         iso3        ISO 3166-1 alpha-3 (see ISO3 below)
@@ -47,7 +49,7 @@ from pathlib import Path
 
 _NE_URL = (
     "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/"
-    "geojson/ne_110m_admin_0_countries.geojson"
+    "geojson/ne_50m_admin_0_countries.geojson"
 )
 _OUT = Path(__file__).resolve().parents[1] / "src/weather_skills_core/data/countries.geojson"
 
@@ -59,6 +61,13 @@ def iso3(props: dict) -> str | None:
         if isinstance(val, str) and len(val) == 3 and val.isalpha():
             return "XKX" if val.upper() == "KOS" else val.upper()
     return None
+
+
+def rounded(coords):
+    """Nested coordinate lists with every number rounded to 4 decimals."""
+    if isinstance(coords, list):
+        return [rounded(c) for c in coords]
+    return round(coords, 4)
 
 
 def main() -> None:
@@ -91,7 +100,10 @@ def main() -> None:
                     "subregion": props.get("SUBREGION") or None,
                     "region_wb": props.get("REGION_WB") or None,
                 },
-                "geometry": src["geometry"],
+                "geometry": {
+                    "type": src["geometry"]["type"],
+                    "coordinates": rounded(src["geometry"]["coordinates"]),
+                },
             }
         )
 
@@ -101,7 +113,7 @@ def main() -> None:
     features.sort(key=lambda f: f["properties"]["iso3"])
     payload = {
         "type": "FeatureCollection",
-        "_source": "Natural Earth 110m admin-0 (nvkelso/natural-earth-vector)",
+        "_source": "Natural Earth 50m admin-0 (nvkelso/natural-earth-vector)",
         "features": features,
     }
     _OUT.write_text(json.dumps(payload, separators=(",", ":"), ensure_ascii=False) + "\n")
