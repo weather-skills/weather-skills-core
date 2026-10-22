@@ -125,8 +125,9 @@ Chaining works like this:
   entry, and each item in its `input` list carries that parent's whole
   history under `history`. Read it as a tree, not a list.
 
-Figures (PNG, JPEG, HTML) store the same JSON in file metadata. A PNG
-or JPEG with a valid history also gets a small star stamp in the corner.
+Figures (PNG, JPEG, GIF, HTML) store the same JSON in file metadata. A PNG,
+JPEG or GIF (every frame) with a valid history also gets a small star stamp in
+the corner.
 
 ## Open and write
 

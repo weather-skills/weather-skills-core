@@ -3,12 +3,15 @@
 Lookup order (geoBoundaries and Nominatim are the only network calls):
 
 1. Bundled Natural Earth countries — ISO3 or country name. The outline comes
-   from geoBoundaries ADM0 (same source as admin units); the bundled 1:110m
+   from geoBoundaries ADM0 (same source as admin units); the bundled 1:50m
    outline is the fallback when geoBoundaries is unavailable.
 2. Bundled Natural Earth groupings — continent / UN / World Bank labels
-   (``Eastern Africa``, ``Sub-Saharan Africa``, …), on the 1:110m outlines.
-3. Bundled custom boxes — ``Indian Ocean basin``.
-4. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi`` or ``KEN-nairobi``.
+   (``Eastern Africa``, ``Sub-Saharan Africa``, …), on the 1:50m outlines.
+3. Bundled custom regions — ``Indian Ocean basin``; one Feature each in
+   ``data/custom_regions.geojson``.
+4. geoBoundaries admin-1 / admin-2 — ``kenya-nairobi``, ``KEN-nairobi``, or
+   ``country-admin1-admin2`` (an admin_2 name used in several admin_1 units
+   needs the ``[geo]`` extra to pick the right one).
 5. OSM Nominatim — landmarks only, via :func:`geocode_nominatim`.
 
 Rebuild the country file with ``tools/build_countries.py``.
@@ -73,21 +76,6 @@ _COUNTRY_ALIASES = {
     "falkland_islands_(uk)": "falkland_islands",
     "gaza_strip": "palestine",
     "west_bank": "palestine",
-}
-
-# Boxes that are not Natural Earth groupings or admin units.
-# ``bbox`` is (N, W, S, E). Aliases are passed through :func:`clean_region_name`.
-_CUSTOM_REGIONS = {
-    "indian_ocean_basin": {
-        "name": "Indian Ocean basin",
-        "bbox": (30.0, 20.0, -40.0, 120.0),
-        "aliases": (
-            "Indian Ocean",
-            "Indian Ocean Basin",
-            "Indian Ocean basin region",
-            "IOB",
-        ),
-    },
 }
 
 
@@ -300,39 +288,41 @@ def _region_indexes() -> dict[str, dict]:
 
 @lru_cache(maxsize=1)
 def _custom_indexes() -> dict[str, dict]:
-    """Cleaned query → bundled custom forecast box."""
+    """Cleaned name or alias → Feature from the bundled ``custom_regions.geojson``."""
+    path = files("weather_skills_core.data").joinpath("custom_regions.geojson")
+    payload = json.loads(path.read_text(encoding="utf-8"))
     by_key: dict[str, dict] = {}
-    for key, spec in _CUSTOM_REGIONS.items():
-        by_key[key] = spec
-        for alias in (spec["name"], *spec.get("aliases", ())):
+    for feature in payload["features"]:
+        props = feature["properties"]
+        for alias in (props["name"], *props.get("aliases", ())):
             cleaned = clean_region_name(alias)
             if cleaned != "no_region":
-                by_key.setdefault(cleaned, spec)
+                by_key.setdefault(cleaned, feature)
     return by_key
 
 
-def _slim_custom(spec: dict) -> dict:
-    north, west, south, east = spec["bbox"]
+def _slim_custom(feature: dict) -> dict:
+    props = feature["properties"]
+    north, west, south, east = bbox_from_geometry(feature["geometry"])
     return _feature(
-        _bbox_rectangle(north, west, south, east),
-        iso3=spec.get("iso3"),
-        name=spec["name"],
-        region_name=clean_region_name(spec["name"]),
+        feature["geometry"],
+        iso3=props.get("iso3"),
+        name=props["name"],
+        region_name=clean_region_name(props["name"]),
         level="custom",
-        country=spec.get("country"),
+        country=props.get("country"),
         bbox=[north, west, south, east],
     )
 
 
 def _slim_country(feature: dict) -> dict:
-    """Country Feature with the geoBoundaries ADM0 outline; bundled 1:110m if unavailable.
+    """Country Feature with the geoBoundaries ADM0 outline; bundled 1:50m if unavailable.
 
-    The bundled outline is coarse (Kenya has 37 vertices, ~20 km off in places)
-    and does not share edges with the geoBoundaries admin units, so it is only
+    The bundled outline is coarser (a few km off in places) and does not share edges with the geoBoundaries admin units, so it is only
     the fallback when geoBoundaries has no ADM0 layer or cannot be reached.
     """
     props = feature["properties"]
-    geometry, source = feature["geometry"], "Natural Earth 1:110m"
+    geometry, source = feature["geometry"], "Natural Earth 1:50m"
     try:
         parts = []
         for gb_feature in _admin_collection(props["iso3"], 0).get("features") or []:
@@ -346,7 +336,7 @@ def _slim_country(feature: dict) -> dict:
             source = "geoBoundaries gbOpen ADM0"
     except (_AdminMissing, DataError) as exc:
         print(
-            f"Warning: using the coarse Natural Earth 1:110m outline for {props['name']}: {exc}",
+            f"Warning: using the coarse Natural Earth 1:50m outline for {props['name']}: {exc}",
             file=sys.stderr,
         )
     return _feature(
@@ -489,7 +479,16 @@ def _find_admin(country: dict, remainder: str) -> dict | None:
     for name in sorted(by1, key=len, reverse=True):
         prefix = f"{name}-"
         if remainder.startswith(prefix):
-            hit = _one(by2.get(remainder[len(prefix) :]))
+            hits = by2.get(remainder[len(prefix) :]) or []
+            if len(hits) > 1:
+                # A name repeated across admin_1 units (Washington County): keep the one
+                # inside this admin_1. Without shapely the name stays ambiguous.
+                try:
+                    parents = _parent_names(iso3, hits)
+                    hits = [h for h, p in zip(hits, parents, strict=True) if p == name]
+                except ImportError:
+                    pass
+            hit = _one(hits)
             if hit is not None:
                 return _slim_admin(country, hit, 2, keyed)
     return None
@@ -641,6 +640,143 @@ def lookup_region(query: str) -> dict:
         "(e.g. East Africa, Indian Ocean), or sub-national region "
         "(country-admin1 / country-admin1-admin2)."
     )
+
+
+LEVELS = ("country", "admin_1", "admin_2", "subregion", "continent")
+
+# Above this many countries in the bbox, level_features warns before fetching admin layers.
+_MANY_COUNTRIES = 30
+
+
+def _overlaps(geometry: dict, bbox) -> bool:
+    """True when any polygon of ``geometry`` overlaps ``bbox`` (``(N, W, S, E)``).
+
+    Part by part: France's outline holds Réunion, so its whole box spans the globe.
+    A box with west > east crosses 180° and is two longitude spans.
+    """
+    north, west, south, east = bbox
+    spans = [(west, east)] if west <= east else [(west, 180.0), (-180.0, east)]
+    for part in _polygon_parts(geometry):
+        n, w, s, e = bbox_from_geometry({"type": "Polygon", "coordinates": part})
+        part_spans = [(w, e)] if w <= e else [(w, 180.0), (-180.0, e)]
+        if (
+            n >= south
+            and s <= north
+            and any(w1 <= e2 and w2 <= e1 for w1, e1 in spans for w2, e2 in part_spans)
+        ):
+            return True
+    return False
+
+
+def _parent_names(iso3: str, features: list[dict]) -> list[str | None]:
+    """Cleaned admin_1 name holding each admin_2 feature, or None. Needs shapely.
+
+    geoBoundaries admin_2 units do not name their admin_1, so each unit's
+    representative point (always inside it) is tested against the admin_1 outlines.
+    """
+    import numpy as np
+    import shapely
+    from shapely.geometry import shape
+
+    try:
+        parents = _admin_collection(iso3, 1).get("features") or []
+    except _AdminMissing:
+        return [None] * len(features)
+    points = [shape(f["geometry"]).representative_point() for f in features]
+    xs = np.array([p.x for p in points])
+    ys = np.array([p.y for p in points])
+    names: list[str | None] = [None] * len(features)
+    for parent in parents:
+        if not parent.get("geometry"):
+            continue
+        name = clean_region_name((parent.get("properties") or {}).get("shapeName", ""))
+        for i in np.flatnonzero(shapely.contains_xy(shape(parent["geometry"]), xs, ys)):
+            names[i] = names[i] or name
+    return names
+
+
+def level_features(level: str, bbox=None) -> list[dict]:
+    """Every unit at ``level`` that overlaps ``bbox`` (``(N, W, S, E)``; None = world).
+
+    Levels are :data:`LEVELS`. Each Feature's ``properties.region_name`` is a
+    unique label (``kenya``, ``kenya-nairobi``, ``kenya-kiambu-kiambu``,
+    ``eastern_africa``) that :func:`lookup_region` accepts, except repeated
+    names, which get ``_2``, ``_3``, ... appended.
+
+    Countries, subregions and continents come from the bundled Natural Earth
+    outlines. Admin units are downloaded from geoBoundaries, one layer per
+    country; admin_2 needs shapely.
+    """
+    if level not in LEVELS:
+        raise UsageError(f"level {level!r} is not one of {', '.join(LEVELS)}")
+    by_iso3, _ = _country_indexes()
+    countries = [
+        feature
+        for _, feature in sorted(by_iso3.items())
+        if feature.get("geometry") and (bbox is None or _overlaps(feature["geometry"], bbox))
+    ]
+    if level in ("subregion", "continent"):
+        labels = sorted({c["properties"][level] for c in countries if c["properties"].get(level)})
+        groups = {spec["name"]: spec for spec in _region_indexes().values()}
+        out = [_slim_region(groups[label]) for label in labels if label in groups]
+        for feature in out:
+            feature["properties"]["level"] = level
+        return out
+
+    if level == "country":
+        return [
+            _feature(
+                c["geometry"],
+                iso3=c["properties"]["iso3"],
+                name=c["properties"]["name"],
+                region_name=clean_region_name(c["properties"]["name"]),
+                level="country",
+                country=c["properties"]["name"],
+                boundary_source="Natural Earth 1:50m",
+            )
+            for c in countries
+        ]
+    if len(countries) > _MANY_COUNTRIES:
+        print(
+            f"Warning: fetching geoBoundaries {level} layers for {len(countries)} countries, "
+            "which can take minutes; pass a smaller bbox to fetch fewer",
+            file=sys.stderr,
+        )
+
+    admin = int(level[-1])
+    out = []
+    for country in countries:
+        iso3 = country["properties"]["iso3"]
+        try:
+            collection = _admin_collection(iso3, admin)
+        except _AdminMissing as exc:
+            print(f"Warning: skipping {country['properties']['name']}: {exc}", file=sys.stderr)
+            continue
+        features = [f for f in collection.get("features") or [] if f.get("geometry")]
+        country_key = clean_region_name(country["properties"]["name"])
+        if admin == 2:
+            try:
+                parents = _parent_names(iso3, features)
+            except ImportError:
+                raise UsageError(
+                    "level admin_2 needs shapely to find each unit's admin_1: "
+                    "install weather-skills-core[geo]"
+                ) from None
+        else:
+            parents = [None] * len(features)
+        # Number repeated keys across the whole country before the bbox test, so a
+        # unit keeps its key whichever of its namesakes fall inside ``bbox``.
+        seen: dict[str, int] = {}
+        for feature, parent in zip(features, parents, strict=True):
+            name = clean_region_name((feature.get("properties") or {}).get("shapeName", ""))
+            key = f"{country_key}-{parent}-{name}" if parent else f"{country_key}-{name}"
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > 1:
+                key = f"{key}_{seen[key]}"
+            if bbox is not None and not _overlaps(feature["geometry"], bbox):
+                continue
+            out.append(_slim_admin(country, feature, admin, key))
+    return out
 
 
 def resolve_region(query: str):
