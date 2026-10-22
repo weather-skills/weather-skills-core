@@ -645,7 +645,7 @@ def lookup_region(query: str) -> dict:
 LEVELS = ("country", "admin_1", "admin_2", "subregion", "continent")
 
 # Above this many countries in the bbox, level_features warns before fetching admin layers.
-_MANY_COUNTRIES = 60
+_MANY_COUNTRIES = 30
 
 
 def _overlaps(geometry: dict, bbox) -> bool:
