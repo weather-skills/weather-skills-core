@@ -499,6 +499,33 @@ def test_level_features_duplicate_admin_names(monkeypatch):
     ]
 
 
+def test_level_features_duplicate_keys_do_not_depend_on_bbox(monkeypatch):
+    """A namesake outside the bbox still counts, so each polygon keeps one key."""
+
+    def square(west, south):
+        ring = [[west, south], [west + 1, south], [west + 1, south + 1], [west, south + 1]]
+        return {"type": "Polygon", "coordinates": [[*ring, ring[0]]]}
+
+    central = {
+        "type": "FeatureCollection",
+        "features": [
+            {"type": "Feature", "properties": {"shapeName": "Central"}, "geometry": square(35, 1)},
+            {"type": "Feature", "properties": {"shapeName": "Central"}, "geometry": square(38, -3)},
+        ],
+    }
+
+    def fake(iso3, level):
+        if iso3 != "KEN" or level != 1:
+            raise region_mod._AdminMissing("offline test")
+        return central
+
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", fake)
+    wide = level_features("admin_1", (2.5, 34.0, -3.5, 39.5))
+    south_only = level_features("admin_1", (-2.0, 37.5, -3.5, 39.5))
+    assert [f["properties"]["region_name"] for f in wide] == ["kenya-central", "kenya-central_2"]
+    assert [f["properties"]["region_name"] for f in south_only] == ["kenya-central_2"]
+
+
 def test_level_features_country_and_subregion():
     """Countries and subregions overlapping East Africa come from bundled data."""
     bbox = (5.0, 34.0, -4.0, 41.0)

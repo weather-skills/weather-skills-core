@@ -692,13 +692,15 @@ def level_features(level: str, bbox=None) -> list[dict]:
         seen: dict[str, int] = {}
         for feature in collection.get("features") or []:
             geometry = feature.get("geometry")
-            if not geometry or (
-                bbox is not None and not _bboxes_overlap(bbox_from_geometry(geometry), bbox)
-            ):
+            if not geometry:
                 continue
+            # Number repeated names across the whole country before the bbox test, so a
+            # unit keeps its key whichever of its namesakes fall inside ``bbox``.
             name = clean_region_name((feature.get("properties") or {}).get("shapeName", ""))
             seen[name] = seen.get(name, 0) + 1
             suffix = f"_{seen[name]}" if seen[name] > 1 else ""
+            if bbox is not None and not _bboxes_overlap(bbox_from_geometry(geometry), bbox):
+                continue
             out.append(_slim_admin(country, feature, admin, f"{country_key}-{name}{suffix}"))
     return out
 
