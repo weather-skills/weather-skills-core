@@ -637,20 +637,18 @@ def test_level_features_subregion_uses_bundled_outlines(monkeypatch):
         assert all(p in parts for p in region_mod._polygon_parts(by_iso3[iso3]["geometry"]))
 
 
-def test_level_features_big_box_countries_use_bundled_outlines(monkeypatch, capsys):
-    """Above _MANY_COUNTRIES, countries come from the bundled file with no fetch."""
+def test_level_features_countries_use_bundled_outlines(monkeypatch):
+    """Countries come from the bundled 1:50m file and fetch nothing."""
 
     def no_fetch(iso3, level):
         raise AssertionError(f"unexpected fetch {iso3} ADM{level}")
 
     monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", no_fetch)
-    monkeypatch.setattr("weather_skills_core.region._MANY_COUNTRIES", 2)
     features = level_features("country", (5.0, 34.0, -4.0, 41.0))
     kenya = next(f for f in features if f["properties"]["iso3"] == "KEN")
     assert kenya["properties"]["region_name"] == "kenya"
     assert kenya["properties"]["boundary_source"] == "Natural Earth 1:50m"
     assert kenya["geometry"] == region_mod._country_indexes()[0]["KEN"]["geometry"]
-    assert "using the bundled Natural Earth 1:50m outlines" in capsys.readouterr().err
 
 
 def test_level_features_big_box_admin_warns(monkeypatch, capsys):

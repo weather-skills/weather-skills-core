@@ -644,8 +644,7 @@ def lookup_region(query: str) -> dict:
 
 LEVELS = ("country", "admin_1", "admin_2", "subregion", "continent")
 
-# Above this many countries in the bbox, level_features draws countries from the bundled
-# outlines instead of fetching each one, and warns before fetching admin layers.
+# Above this many countries in the bbox, level_features warns before fetching admin layers.
 _MANY_COUNTRIES = 60
 
 
@@ -712,12 +711,13 @@ def level_features(level: str, bbox=None) -> list[dict]:
     labels only, :func:`lookup_region` does not accept them. Every other key
     resolves to the same unit through :func:`lookup_region`.
 
-    Countries and admin units use geoBoundaries outlines, as in
-    :func:`lookup_region`, fetched for every country in ``bbox``. Above
-    ``_MANY_COUNTRIES`` countries, ``country`` uses the bundled Natural Earth
-    1:50m outlines instead and admin levels warn before fetching. Subregions
-    and continents always use the bundled outlines and fetch nothing. Bundled
-    coasts and borders can differ from the geoBoundaries units by a few km.
+    Countries, subregions and continents use the bundled Natural Earth 1:50m
+    outlines and fetch nothing; :func:`lookup_region` gives countries the
+    finer geoBoundaries outline instead. Admin units use geoBoundaries, fetched
+    for every country in ``bbox``; above ``_MANY_COUNTRIES`` countries a
+    warning says so. Bundled coasts and borders can differ from the
+    geoBoundaries units by a few km, and Natural Earth draws some disputed
+    areas as their own country (Somaliland, ``somaliland``).
     """
     if level not in LEVELS:
         raise UsageError(f"level {level!r} is not one of {', '.join(LEVELS)}")
@@ -735,15 +735,7 @@ def level_features(level: str, bbox=None) -> list[dict]:
             feature["properties"]["level"] = level
         return out
 
-    many = len(countries) > _MANY_COUNTRIES
-    if level == "country" and many:
-        # A big box: one download per country would take minutes, and a few km of
-        # outline error does not matter at this scale.
-        print(
-            f"Warning: {len(countries)} countries in the bbox; using the bundled Natural Earth "
-            "1:50m outlines instead of fetching each from geoBoundaries",
-            file=sys.stderr,
-        )
+    if level == "country":
         return [
             _feature(
                 c["geometry"],
@@ -756,9 +748,7 @@ def level_features(level: str, bbox=None) -> list[dict]:
             )
             for c in countries
         ]
-    if level == "country":
-        return [_slim_country(c) for c in countries]
-    if many:
+    if len(countries) > _MANY_COUNTRIES:
         print(
             f"Warning: fetching geoBoundaries {level} layers for {len(countries)} countries, "
             "which can take minutes; pass a smaller bbox to fetch fewer",
