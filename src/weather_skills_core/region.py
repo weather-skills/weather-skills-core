@@ -702,22 +702,14 @@ def _parent_names(iso3: str, features: list[dict]) -> list[str | None]:
 def level_features(level: str, bbox=None) -> list[dict]:
     """Every unit at ``level`` that overlaps ``bbox`` (``(N, W, S, E)``; None = world).
 
-    Levels are :data:`LEVELS`. Each Feature carries the display ``name`` and a
-    ``properties.region_name`` key that names one polygon, for use as a label:
-    ``kenya``, ``kenya-nairobi``, ``kenya-kiambu-kiambu`` (admin_2 keys name
-    their admin_1, found by location; needs shapely), ``eastern_africa``. A key
-    that repeats within a country gets ``_2``, ``_3``, ... appended, numbered
-    over the whole country so it does not depend on ``bbox``; those keys are
-    labels only, :func:`lookup_region` does not accept them. Every other key
-    resolves to the same unit through :func:`lookup_region`.
+    Levels are :data:`LEVELS`. Each Feature's ``properties.region_name`` is a
+    unique label (``kenya``, ``kenya-nairobi``, ``kenya-kiambu-kiambu``,
+    ``eastern_africa``) that :func:`lookup_region` accepts, except repeated
+    names, which get ``_2``, ``_3``, ... appended.
 
-    Countries, subregions and continents use the bundled Natural Earth 1:50m
-    outlines and fetch nothing; :func:`lookup_region` gives countries the
-    finer geoBoundaries outline instead. Admin units use geoBoundaries, fetched
-    for every country in ``bbox``; above ``_MANY_COUNTRIES`` countries a
-    warning says so. Bundled coasts and borders can differ from the
-    geoBoundaries units by a few km, and Natural Earth draws some disputed
-    areas as their own country (Somaliland, ``somaliland``).
+    Countries, subregions and continents come from the bundled Natural Earth
+    outlines. Admin units are downloaded from geoBoundaries, one layer per
+    country; admin_2 needs shapely.
     """
     if level not in LEVELS:
         raise UsageError(f"level {level!r} is not one of {', '.join(LEVELS)}")
