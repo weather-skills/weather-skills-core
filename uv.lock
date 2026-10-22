@@ -875,6 +875,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "pint-xarray" },
+    { name = "pyyaml" },
     { name = "xarray" },
     { name = "zarr" },
 ]
@@ -902,6 +903,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.5" },
     { name = "pillow", specifier = ">=10.1" },
     { name = "pint-xarray", specifier = ">=0.6" },
+    { name = "pyyaml", specifier = ">=6" },
     { name = "shapely", marker = "extra == 'geo'", specifier = ">=2.1.2" },
     { name = "xarray", specifier = ">=2026.7" },
     { name = "zarr", specifier = ">=3.2" },
