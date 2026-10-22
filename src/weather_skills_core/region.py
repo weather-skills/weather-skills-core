@@ -651,14 +651,16 @@ def _bboxes_overlap(a, b) -> bool:
 def level_features(level: str, bbox=None) -> list[dict]:
     """Every unit at ``level`` whose extent overlaps ``bbox`` (``(N, W, S, E)``; None = world).
 
-    Levels are :data:`LEVELS`. Each Feature carries ``properties.region_name``,
-    the key :func:`lookup_region` accepts (``kenya``, ``kenya-nairobi``,
-    ``eastern_africa``), and the display ``name``. Countries and admin units
-    use the same geoBoundaries outlines as :func:`lookup_region`; subregions
-    and continents the bundled Natural Earth 1:110m outlines. Admin units are
-    fetched only for countries whose bundled outline overlaps ``bbox``. An
-    admin name that repeats within a country gets ``_2``, ``_3``, ... appended
-    to its key, so every key names one polygon.
+    Levels are :data:`LEVELS`. Each Feature carries the display ``name`` and a
+    ``properties.region_name`` key (``kenya``, ``kenya-nairobi``,
+    ``eastern_africa``) that names one polygon, for use as a label. An admin
+    name that repeats within a country gets ``_2``, ``_3``, ... appended, so
+    those keys are labels only: :func:`lookup_region` does not accept them, and
+    it resolves an admin_2 key whose name is also an admin_1 name to the
+    admin_1 unit. Countries and admin units use the same geoBoundaries
+    outlines as :func:`lookup_region`; subregions and continents the bundled
+    Natural Earth 1:110m outlines. Admin units are fetched only for countries
+    whose bundled outline overlaps ``bbox``.
     """
     if level not in LEVELS:
         raise UsageError(f"level {level!r} is not one of {', '.join(LEVELS)}")
