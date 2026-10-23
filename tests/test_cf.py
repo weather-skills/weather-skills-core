@@ -409,3 +409,19 @@ def test_drop_dangling_cf_refs_keeps_present_refs():
     ds["precip"].attrs["grid_mapping"] = "spatial_ref: latitude longitude"
     out = dataset.drop_dangling_cf_refs(ds)
     assert out["precip"].attrs["grid_mapping"] == "spatial_ref: latitude longitude"
+
+
+def _with_coverage():
+    ds = make_gridded()
+    ds["precip"].attrs["ancillary_variables"] = "precip_coverage"
+    ds["precip_coverage"] = (ds["precip"].dims, np.ones(ds["precip"].shape), {"units": "1"})
+    return ds
+
+
+def test_measured_variables_skip_ancillaries():
+    ds = _with_coverage()
+    assert dataset.measured_variables(ds) == ["precip"]
+    assert dataset.auto_variable(ds[["precip_coverage", "precip"]]) == "precip"
+    # Unlinked, a coverage-like name is an ordinary variable.
+    del ds["precip"].attrs["ancillary_variables"]
+    assert dataset.measured_variables(ds) == ["precip", "precip_coverage"]
