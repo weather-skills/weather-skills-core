@@ -237,3 +237,117 @@ def test_result_is_quantified():
     out = summarize(quantify_dataset(make_gridded()), dims=["time"])
     assert isinstance(out, xr.Dataset)
     assert out["precip"].pint.units is not None
+
+
+def test_std_of_celsius_is_a_delta():
+    ds = _celsius()
+    ds["t2m"].values[:] = np.random.default_rng(0).normal(20, 3, ds["t2m"].shape)
+    plain = run(ds, dims=["time", "latitude"], method="std")
+    grouped = run(ds.assign_coords(r=("latitude", ["a", "a"])), by=["r"], method="std")
+    assert plain["t2m"].attrs["units"] == grouped["t2m"].attrs["units"] == "delta_degC"
+
+
+def test_sum_of_celsius_is_refused():
+    with pytest.raises(UsageError, match="convert to kelvin first"):
+        run(_celsius(), dims=["latitude"], method="sum")
+
+
+def test_float32_weighted_mean_keeps_float64_precision():
+    ds = make_gridded(lats=(0.0, 60.0))
+    ds["precip"] = ds["precip"].astype("float32") / 3
+    out = run(ds, dims=["latitude"], weights=latitude_weights(ds["latitude"]))
+    expected = ds["precip"].astype("float64").weighted(latitude_weights(ds["latitude"]))
+    np.testing.assert_array_equal(out["precip"].values, expected.mean("latitude").values)
+
+
+# Brute-force reference: every group gathered by hand with numpy masks.
+_NUMPY = {
+    "mean": np.nanmean,
+    "std": lambda x: np.nanstd(x, ddof=1) if np.isfinite(x).sum() > 1 else np.nan,
+    "min": np.nanmin,
+    "max": np.nanmax,
+    "sum": np.nansum,
+    "median": np.nanmedian,
+}
+
+
+@pytest.mark.parametrize("seed", range(12))
+@pytest.mark.parametrize("method", [*_NUMPY, "weighted"])
+def test_matches_brute_force_groups(seed, method):
+    """Random daily grid with NaNs, two spatial labels and a month label, against numpy.
+
+    Each cell is left out of a month it covers below min_coverage, before pooling cells.
+    """
+    rng = np.random.default_rng(seed)
+    lats = np.sort(rng.choice(np.arange(-70.0, 71.0, 10.0), 4, replace=False))
+    ds = make_gridded(n_time=365, start="2021-01-01", lats=lats, lons=(30.0, 31.0, 32.0))
+    ds["precip"].attrs["units"] = "mm"
+    data = rng.gamma(2.0, 3.0, ds["precip"].shape)
+    data[rng.random(data.shape) < rng.choice([0.0, 0.05, 0.3])] = np.nan
+    ds["precip"].values[:] = data
+    region = rng.choice(["a", "b", ""], (4, 3))
+    zone = rng.choice(["w", "e"], (4, 3))
+    month = ds["time"].dt.month.values
+    ds = ds.assign_coords(
+        region=(("latitude", "longitude"), region),
+        zone=(("latitude", "longitude"), zone),
+        month=("time", month),
+    )
+    min_coverage = float(rng.choice([0.0, 0.8, 1.0]))
+    weights = latitude_weights(ds["latitude"])
+    out = run(
+        ds,
+        by=["region", "zone", "month"],
+        method="mean" if method == "weighted" else method,
+        weights=weights if method == "weighted" else None,
+        min_coverage=min_coverage,
+    )["precip"]
+
+    w = np.broadcast_to(weights.values[:, None], (4, 3))
+    checked = 0
+    for r in ("a", "b"):
+        for z in ("w", "e"):
+            for m in range(1, 13):
+                cells = (region == r) & (zone == z)
+                days = data[month == m]
+                share = np.isfinite(days).sum(axis=0) / (month == m).sum()
+                keep = cells & (share >= min_coverage)
+                if r not in out["region"] or not cells.any():
+                    continue
+                got = out.sel(region=r, zone=z, month=m).item()
+                checked += np.isfinite(got)
+                values, cell_w = days[:, keep], np.broadcast_to(w[keep], days[:, keep].shape)
+                if not np.isfinite(values).any():
+                    assert np.isnan(got)
+                elif method == "weighted":
+                    ok = np.isfinite(values)
+                    assert got == pytest.approx((values[ok] * cell_w[ok]).sum() / cell_w[ok].sum())
+                else:
+                    expected = _NUMPY[method](values)
+                    if np.isnan(expected):
+                        assert np.isnan(got)
+                    else:
+                        assert got == pytest.approx(expected)
+    assert checked > 0 or min_coverage == 1.0
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_grouped_mean_of_squares_gives_pooled_rmse(seed):
+    """Averaging squared errors per group, then the root, is the RMSE of all the group's pairs."""
+    rng = np.random.default_rng(seed)
+    ds = make_gridded(n_time=30, lats=(0.0, 30.0, 60.0), lons=(30.0, 31.0))
+    error = rng.normal(0, 2, ds["precip"].shape)
+    error[rng.random(error.shape) < 0.2] = np.nan
+    ds["precip"].values[:] = error**2
+    ds["precip"].attrs["units"] = "mm2 day-2"
+    region = np.array([["a", "a"], ["a", "b"], ["b", "b"]])
+    ds = ds.assign_coords(region=(("latitude", "longitude"), region))
+    weights = latitude_weights(ds["latitude"])
+    out = run(ds, dims=["time"], by=["region"], weights=weights)["precip"]
+
+    w = np.broadcast_to(weights.values[None, :, None], error.shape)
+    for r in ("a", "b"):
+        e, cw = error[:, region == r], w[:, region == r]
+        ok = np.isfinite(e)
+        rmse = np.sqrt((e[ok] ** 2 * cw[ok]).sum() / cw[ok].sum())
+        assert np.sqrt(out.sel(region=r).item()) == pytest.approx(rmse)
