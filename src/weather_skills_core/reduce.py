@@ -1,22 +1,19 @@
 """Reduce a Dataset with one statistic, over whole dims or per group of label coords."""
 
-import datetime
 import itertools
-import re
 import sys
 
 import numpy as np
-import pandas as pd
 import xarray as xr
 
 from weather_skills_core.errors import DataError, UsageError
-from weather_skills_core.standard_utils import TIME_LABELS, calendar_labels
+from weather_skills_core.standard_utils import TIME_LABELS, calendar_expected_steps
 from weather_skills_core.units import (
     AGGREGATION_COVERAGE_COORD,
     AGGREGATION_PERIOD_ATTR,
     data_interval_of,
+    format_duration,
     infer_timestep,
-    parse_aggregation_period,
 )
 
 METHODS = ("mean", "std", "min", "max", "sum", "median", "quantile")
@@ -126,19 +123,9 @@ def summarize(
     for var in selected:
         if var not in ds.data_vars:
             raise UsageError(f"variable {var!r} not in dataset (have {list(ds.data_vars)})")
-    # Read before the label coords on time are dropped below.
-    seasons = ds["month_group"].values if "month_group" in ds.coords and time_by else None
-    step_share = None
-    if AGGREGATION_COVERAGE_COORD in ds.coords and ds[AGGREGATION_COVERAGE_COORD].dims == ("time",):
-        # An input interval that was itself 3/7 complete counts as 3/7 of a step.
-        step_share = np.nan_to_num(np.asarray(ds[AGGREGATION_COVERAGE_COORD].values, dtype=float))
     # The dims a label spans collapse into one entry per label.
     group_dims = list(dict.fromkeys(d for b in by for d in ds[b].dims))
     dims = list(dict.fromkeys([*group_dims, *dims]))
-    # Other label coords on the grouped dims (admin_1_name, ...) cannot survive the collapse.
-    ds = ds.drop_vars(
-        [c for c in ds.coords if c not in (*by, *ds.dims) and set(ds[c].dims) & set(group_dims)]
-    )
     # Groups, built once for every variable. Labels on the same dims are matched together;
     # labels on different dims (a county and a year) combine as a product. Each group keeps
     # only the rows/columns/times it touches, plus a mask when that box holds other cells,
@@ -177,13 +164,8 @@ def summarize(
             )
         groups.append(entries)
 
-    # Coverage: for each time group, the steps a complete record would hold. The labels are
-    # rebuilt on a gap-free axis at the data's step reaching a year past both ends; a group
-    # expects every step of each calendar run (one MAM, one year) the data touch, so a
-    # season cut by the start or end of the record is incomplete.
+    # Coverage: the steps a complete group holds, from the calendar of the time labels.
     if time_by:
-        times = ds.indexes["time"]
-        first = times[0]
         period = next(
             (
                 ds[v].attrs[AGGREGATION_PERIOD_ATTR]
@@ -192,63 +174,28 @@ def summarize(
             ),
             None,
         ) or data_interval_of(ds)
-        calendar = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period or "")
-        if calendar or (period or "").strip() == "1 dekad":
-            # Calendar steps: labels must be month starts (dekads on days 1, 11, 21).
-            every = (
-                int(calendar.group(1)) * (12 if calendar.group(2) == "year" else 1)
-                if calendar
-                else 1
-            )
-            n = (times[-1].year - first.year) * 12 + times[-1].month - first.month
-            full = [
-                first.replace(
-                    year=first.year + (first.month - 1 + k) // 12,
-                    month=(first.month - 1 + k) % 12 + 1,
-                    day=day,
-                )
-                for k in range(-24, n + 25)
-                if k % every == 0
-                for day in ((1,) if calendar else (1, 11, 21))
-            ]
-        else:
-            step = parse_aggregation_period(period) if period else infer_timestep(ds, "time")
-            step = datetime.timedelta(seconds=float(step.to("second").magnitude))
-            margin = int(np.ceil(datetime.timedelta(days=366) / step))
-            n = round((times[-1] - first) / step)
-            full = [first + i * step for i in range(-margin, n + margin + 1)]
-        full = (
-            pd.DatetimeIndex(full) if isinstance(times, pd.DatetimeIndex) else xr.CFTimeIndex(full)
+        seasons = ds["month_group"].values if "month_group" in ds.coords else np.array([])
+        expected = calendar_expected_steps(
+            ds.indexes["time"],
+            period or format_duration(infer_timestep(ds, "time")),
+            {b: ds[b].values for b in time_by},
+            list(np.unique(seasons[seasons != ""])),
         )
-        at = full.get_indexer(times)
-        if (at < 0).any():
-            raise UsageError(
-                f"time values do not fall on a regular {period or 'time'} axis, so the steps "
-                "each time group should hold cannot be counted"
-            )
-        tokens = [] if seasons is None else list(np.unique(seasons[seasons != ""]))
-        rebuilt = calendar_labels(full, tokens)
-        change = np.zeros(full.size, dtype=bool)
-        grouped = np.ones(full.size, dtype=bool)
-        for b in time_by:
-            if not np.array_equal(rebuilt[b][at], ds[b].values):
-                raise UsageError(
-                    f"by {b!r} does not hold the calendar {b} of each time step, as "
-                    "calendar_labels builds it, so its full calendar period is unknown"
-                )
-            change[1:] |= rebuilt[b][1:] != rebuilt[b][:-1]
-            if b == "month_group":
-                grouped &= rebuilt[b] != ""
-        run = np.cumsum(change)
-        touched = np.isin(run, run[at]) & grouped
-        if touched[0] or touched[-1]:
-            raise UsageError("a time group lasts over a year, so its full period is unknown")
         t = list(dict.fromkeys(ds[b].dims for b in by)).index(("time",))
         for group in groups[t]:
-            matches = [rebuilt[b] == label_values[b][i] for b, i in group["labels"].items()]
-            group["expected"] = int((touched & np.logical_and.reduce(matches)).sum())
+            key = tuple(label_values[b][i] for b, i in group["labels"].items())
+            group["expected"] = expected[key]
+        # An input interval that was itself 3/7 complete counts as 3/7 of a step.
+        step_share = None
+        if AGGREGATION_COVERAGE_COORD in ds.coords and ds[AGGREGATION_COVERAGE_COORD].dims == (
+            "time",
+        ):
+            step_share = np.nan_to_num(ds[AGGREGATION_COVERAGE_COORD].values.astype(float))
 
-    out = ds.drop_vars(by)
+    # Other label coords on the grouped dims (admin_1_name, ...) cannot survive the collapse.
+    out = ds.drop_vars(
+        [c for c in ds.coords if c not in ds.dims and set(ds[c].dims) & set(group_dims)]
+    )
     for var in selected:
         da = ds[var]
         rdims = [d for d in dims if d in da.dims]

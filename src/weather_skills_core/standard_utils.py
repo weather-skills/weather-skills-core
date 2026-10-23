@@ -571,6 +571,93 @@ def calendar_labels(times, month_groups=()):
     }
 
 
+def calendar_expected_steps(times, period, labels, month_groups=()):
+    """How many steps each complete calendar group holds at the data's time step.
+
+    A group is one combination of calendar labels (``{"year": ..., "month_group": ...}``,
+    each an array along ``times`` as ``calendar_labels`` builds it). A complete group
+    holds every step of each calendar run the data touch: one MAM, one March, one year.
+    So a season cut by the start or end of the record, or a March with missing days,
+    holds fewer steps than this count.
+
+    Args:
+        times: The data's pandas DatetimeIndex or CFTimeIndex, possibly with gaps.
+        period: The data's step: a duration (``1 day``, ``6 hour``, ``7 day``), a calendar
+            step (``1 month``, ``3 month``, ``1 year``), or ``1 dekad`` (days 1, 11, 21).
+        labels: Label name (one of ``TIME_LABELS``) to its values along ``times``.
+        month_groups: The month groups the labels were built with (``MAM``, ``DJF``); a
+            ``year`` label depends on them.
+
+    Returns:
+        Dict from a tuple of label values (in ``labels`` order) to its expected steps.
+
+    Raises:
+        UsageError: times off a regular ``period`` axis; labels that are not the calendar
+            labels of their times; a group lasting over a year.
+    """
+    import datetime
+    import re
+    from collections import Counter
+
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    from weather_skills_core.units import parse_aggregation_period
+
+    # Rebuild the labels on a gap-free axis at the data's step, reaching a year past
+    # both ends, so every calendar run the data touch is whole.
+    first = times[0]
+    calendar = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
+    if calendar or period.strip() == "1 dekad":
+        # Calendar steps: labels must be month starts (dekads on days 1, 11, 21).
+        every = (
+            int(calendar.group(1)) * (12 if calendar.group(2) == "year" else 1) if calendar else 1
+        )
+        n = (times[-1].year - first.year) * 12 + times[-1].month - first.month
+        full = [
+            first.replace(
+                year=first.year + (first.month - 1 + k) // 12,
+                month=(first.month - 1 + k) % 12 + 1,
+                day=day,
+            )
+            for k in range(-24, n + 25)
+            if k % every == 0
+            for day in ((1,) if calendar else (1, 11, 21))
+        ]
+    else:
+        step = parse_aggregation_period(period)
+        step = datetime.timedelta(seconds=float(step.to("second").magnitude))
+        margin = int(np.ceil(datetime.timedelta(days=366) / step))
+        n = round((times[-1] - first) / step)
+        full = [first + i * step for i in range(-margin, n + margin + 1)]
+    full = pd.DatetimeIndex(full) if isinstance(times, pd.DatetimeIndex) else xr.CFTimeIndex(full)
+    at = full.get_indexer(times)
+    if (at < 0).any():
+        raise UsageError(
+            f"time values do not fall on a regular {period} axis, so the steps "
+            "each time group should hold cannot be counted"
+        )
+    rebuilt = calendar_labels(full, month_groups)
+    change = np.zeros(full.size, dtype=bool)
+    grouped = np.ones(full.size, dtype=bool)
+    for name, values in labels.items():
+        if not np.array_equal(rebuilt[name][at], values):
+            raise UsageError(
+                f"{name!r} does not hold the calendar {name} of each time step, as "
+                "calendar_labels builds it, so its full calendar period is unknown"
+            )
+        change[1:] |= rebuilt[name][1:] != rebuilt[name][:-1]
+        if name == "month_group":
+            grouped &= rebuilt[name] != ""
+    # Steps of the calendar runs (one MAM, one year) the data touch.
+    run = np.cumsum(change)
+    touched = np.isin(run, run[at]) & grouped
+    if touched[0] or touched[-1]:
+        raise UsageError("a time group lasts over a year, so its full period is unknown")
+    return Counter(zip(*(rebuilt[name][touched] for name in labels), strict=True))
+
+
 _WEEKDAYS = {name.lower(): i for i, name in enumerate(day_name)}
 
 

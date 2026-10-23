@@ -819,3 +819,47 @@ def test_calendar_labels_bad_groups(groups, message):
 
     with pytest.raises(UsageError, match=message):
         utils.calendar_labels(pd.DatetimeIndex(["2024-01-01"]), groups)
+
+
+def test_calendar_expected_steps_daily_seasons_and_years():
+    import pandas as pd
+
+    # 1 Apr 2020 - 31 Dec 2020 with gaps: MAM is cut by the record start, OND is whole.
+    times = pd.date_range("2020-04-01", "2020-12-31", freq="D").delete([100, 101, 250])
+    labels = utils.calendar_labels(times, ["MAM", "OND"])
+    expected = utils.calendar_expected_steps(
+        times,
+        "1 day",
+        {"year": labels["year"], "month_group": labels["month_group"]},
+        ["MAM", "OND"],
+    )
+    assert expected[(2020, "MAM")] == 92
+    assert expected[(2020, "OND")] == 92
+    assert (2020, "") not in expected
+
+
+def test_calendar_expected_steps_monthly_and_recurring_months():
+    import pandas as pd
+
+    times = pd.date_range("2001-03-01", "2003-02-01", freq="MS")
+    labels = utils.calendar_labels(times)
+    by_month = utils.calendar_expected_steps(times, "1 month", {"month": labels["month"]})
+    assert by_month[(3,)] == 2  # March 2001 and March 2002
+    days = pd.date_range("2024-02-03", "2024-03-05", freq="D")
+    february = utils.calendar_expected_steps(
+        days, "1 day", {"month": utils.calendar_labels(days)["month"]}
+    )
+    assert february[(2,)] == 29 and february[(3,)] == 31
+
+
+def test_calendar_expected_steps_noleap_djf_and_errors():
+    times = xr.date_range("2020-12-01", periods=90, freq="D", calendar="noleap", use_cftime=True)
+    labels = utils.calendar_labels(times, ["DJF"])
+    expected = utils.calendar_expected_steps(
+        times, "1 day", {"year": labels["year"], "month_group": labels["month_group"]}, ["DJF"]
+    )
+    assert expected == {(2020, "DJF"): 90}
+    with pytest.raises(UsageError, match="does not hold the calendar year"):
+        utils.calendar_expected_steps(times, "1 day", {"year": labels["year"] + 1}, ["DJF"])
+    with pytest.raises(UsageError, match="regular 7 day axis"):
+        utils.calendar_expected_steps(times, "7 day", {"year": labels["year"]}, ["DJF"])
