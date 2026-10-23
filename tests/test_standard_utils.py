@@ -782,3 +782,40 @@ def test_parse_bbox_rejects_bad_latitudes(bbox):
 
 def test_parse_bbox_allows_antimeridian():
     assert utils.parse_bbox("5/170/-5/-170") == (5.0, 170.0, -5.0, -170.0)
+
+
+def test_calendar_labels_months_groups_and_year():
+    import pandas as pd
+
+    times = pd.DatetimeIndex(["2023-07-01", "2023-12-15", "2024-01-15", "2024-02-29", "2024-04-01"])
+    labels = utils.calendar_labels(times, ["DJF", "MAM"])
+    assert labels["month"].tolist() == [7, 12, 1, 2, 4]
+    assert labels["dayofyear"].tolist() == [182, 349, 15, 60, 92]
+    assert labels["month_group"].tolist() == ["", "DJF", "DJF", "DJF", "MAM"]
+    # DJF takes the year it begins.
+    assert labels["year"].tolist() == [2023, 2023, 2023, 2023, 2024]
+    assert set(labels) == set(utils.TIME_LABELS)
+
+
+def test_calendar_labels_cftime_noleap():
+    times = xr.date_range("2023-11-01", periods=4, freq="MS", calendar="noleap", use_cftime=True)
+    labels = utils.calendar_labels(times, ["NDJ"])
+    assert labels["month_group"].tolist() == ["NDJ", "NDJ", "NDJ", ""]
+    assert labels["year"].tolist() == [2023, 2023, 2023, 2024]
+
+
+@pytest.mark.parametrize(
+    ("groups", "message"),
+    [
+        (["J"], "more than one"),
+        (["MAX"], "not a run"),
+        (["mam"], "not a run"),
+        ([""], "not a run"),
+        (["MAM", "AMJ"], "share a month"),
+    ],
+)
+def test_calendar_labels_bad_groups(groups, message):
+    import pandas as pd
+
+    with pytest.raises(UsageError, match=message):
+        utils.calendar_labels(pd.DatetimeIndex(["2024-01-01"]), groups)

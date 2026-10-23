@@ -10,6 +10,7 @@ import pandas as pd
 import xarray as xr
 
 from weather_skills_core.errors import DataError, UsageError
+from weather_skills_core.standard_utils import TIME_LABELS, calendar_labels
 from weather_skills_core.units import (
     AGGREGATION_COVERAGE_COORD,
     AGGREGATION_PERIOD_ATTR,
@@ -19,9 +20,6 @@ from weather_skills_core.units import (
 )
 
 METHODS = ("mean", "std", "min", "max", "sum", "median")
-# Time labels whose full calendar period is known, as label-group writes them.
-TIME_LABELS = ("month", "year", "dayofyear", "month_group")
-_INITIALS = "JFMAMJJASOND"
 
 
 def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, min_coverage=1.0):
@@ -60,7 +58,7 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
         weights: DataArray on some of ``ds``'s dims, such as ``latitude_weights`` for
             area. ``method="mean"`` only. A variable without those dims gets a plain mean.
         min_coverage: 0-1, used only with a ``by`` label along time (one of
-            ``TIME_LABELS``, as label-group writes them). For each group, each input cell
+            ``TIME_LABELS``, as ``calendar_labels`` builds them). For each group, each input cell
             (grid cell, station, member) with data for less than this share of the
             group's full calendar period (all 92 days of a MAM) is left out before cells
             are pooled. Missing steps are never filled. Default 1.0: complete groups only.
@@ -101,7 +99,7 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
     for b in time_by:
         if b not in TIME_LABELS or ds[b].dims != ("time",):
             raise UsageError(
-                f"by {b!r} runs along time but is not a label-group time label "
+                f"by {b!r} runs along time but is not a calendar time label "
                 f"({', '.join(TIME_LABELS)}), so its full calendar period is unknown"
             )
     selected = list(dict.fromkeys(variables)) if variables else list(ds.data_vars)
@@ -208,34 +206,15 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
                 f"time values do not fall on a regular {period or 'time'} axis, so the steps "
                 "each time group should hold cannot be counted"
             )
-        month = np.asarray(full.month)
-        season = np.full(full.size, "", dtype=object)
-        begins_last_year = np.zeros(full.size, dtype=bool)
-        for token in np.unique(seasons[seasons != ""]) if seasons is not None else []:
-            starts = [
-                start
-                for start in range(12)
-                if len(token) <= 12
-                and all(_INITIALS[(start + i) % 12] == c for i, c in enumerate(token))
-            ]
-            if len(starts) == 1:  # anything else fails the check below
-                months = [(starts[0] + i) % 12 + 1 for i in range(len(token))]
-                season[np.isin(month, months)] = token
-                begins_last_year |= np.isin(month, months) & (month < months[0])
-        rebuilt = {
-            "month": month,
-            "dayofyear": np.asarray(full.dayofyear),
-            # As label-group: a group crossing December takes the year it begins.
-            "year": np.asarray(full.year) - begins_last_year,
-            "month_group": season.astype(str),
-        }
+        tokens = [] if seasons is None else list(np.unique(seasons[seasons != ""]))
+        rebuilt = calendar_labels(full, tokens)
         change = np.zeros(full.size, dtype=bool)
         grouped = np.ones(full.size, dtype=bool)
         for b in time_by:
             if not np.array_equal(rebuilt[b][at], ds[b].values):
                 raise UsageError(
                     f"by {b!r} does not hold the calendar {b} of each time step, as "
-                    "label-group writes it, so its full calendar period is unknown"
+                    "calendar_labels builds it, so its full calendar period is unknown"
                 )
             change[1:] |= rebuilt[b][1:] != rebuilt[b][:-1]
             if b == "month_group":

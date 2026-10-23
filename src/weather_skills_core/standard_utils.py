@@ -517,6 +517,60 @@ def latitude_weights(lats):
     return weights / weights.mean()
 
 
+# Calendar labels along time that calendar_labels builds.
+TIME_LABELS = ("month", "year", "dayofyear", "month_group")
+
+
+def calendar_labels(times, month_groups=()):
+    """The calendar labels of each time: month, day of year, month group, and year.
+
+    ``times`` is a pandas DatetimeIndex or a CFTimeIndex. ``month_groups`` are runs of
+    uppercase month initials (``MAM``, ``OND``, ``DJF``) that share no month.
+
+    Returns a dict of int or str numpy arrays, one value per time:
+
+    - ``month``: 1-12.
+    - ``dayofyear``: 1-366.
+    - ``month_group``: the group holding the time's month, or ``""``.
+    - ``year``: the calendar year, except that a group crossing December takes the
+      year it begins (Dec 2023 to Feb 2024 are ``DJF`` of 2023).
+
+    Raises UsageError for a group that is not exactly one run of months, or groups
+    that share a month.
+    """
+    import numpy as np
+
+    month = np.asarray(times.month, dtype=np.int64)
+    group = np.full(month.shape, "", dtype=object)
+    begins_last_year = np.zeros(month.shape, dtype=bool)
+    taken = set()
+    for token in month_groups:
+        starts = [
+            start
+            for start in range(12)
+            if len(token) <= 12
+            and all("JFMAMJJASOND"[(start + i) % 12] == c for i, c in enumerate(token))
+        ]
+        if not token or len(starts) != 1:
+            why = "matches more than one run of months" if token and starts else "is not a run"
+            raise UsageError(
+                f"month group {token!r} {why}; use uppercase month initials like MAM, OND or DJF"
+            )
+        months = [(starts[0] + i) % 12 + 1 for i in range(len(token))]
+        if taken & set(months):
+            raise UsageError(f"month groups share a month ({','.join(month_groups)})")
+        taken |= set(months)
+        in_group = np.isin(month, months)
+        group[in_group] = token
+        begins_last_year |= in_group & (month < months[0])
+    return {
+        "month": month,
+        "dayofyear": np.asarray(times.day_of_year, dtype=np.int64),
+        "year": np.asarray(times.year, dtype=np.int64) - begins_last_year,
+        "month_group": group.astype(str),
+    }
+
+
 _WEEKDAYS = {name.lower(): i for i, name in enumerate(day_name)}
 
 
