@@ -405,3 +405,25 @@ def test_quantile_errors(kwargs, message):
         kwargs["weights"] = latitude_weights(ds["latitude"])
     with pytest.raises(UsageError, match=message):
         run(ds, dims=["time"], **kwargs)
+
+
+def test_input_cell_coverage_counts_and_is_not_reduced():
+    """A 3/7-complete daily step at one cell counts as 3/7 of a step there."""
+    ds = make_point_obs(n_time=92, start="2020-03-01", fill=1.0)
+    ds["precip"].attrs.update(
+        units="mm", cell_methods="time: sum", ancillary_variables="precip_coverage"
+    )
+    cov = np.ones(ds["precip"].shape)
+    cov[1, 0] = 3 / 7
+    ds["precip_coverage"] = (ds["precip"].dims, cov, {"units": "1"})
+    ds = ds.assign_coords(
+        year=("time", np.full(92, 2020)), month_group=("time", np.full(92, "MAM"))
+    )
+    out = run(ds, by=["year", "month_group"], method="sum", min_coverage=0.99)["precip"]
+    assert out.sel(point_id="S0").item() == 92.0
+    assert out.sel(point_id="S1").item() == 92.0  # 91 + 3/7 of 92 steps is above 0.99
+    strict = run(ds, by=["year", "month_group"], method="sum")
+    assert np.isnan(strict["precip"].sel(point_id="S1").item())
+    assert "precip_coverage" not in strict and "ancillary_variables" not in strict["precip"].attrs
+    mean = run(ds, dims=["time"])
+    assert list(mean.data_vars) == ["precip"]
