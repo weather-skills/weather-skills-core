@@ -272,7 +272,7 @@ _NUMPY = {
 
 
 @pytest.mark.parametrize("seed", range(12))
-@pytest.mark.parametrize("method", [*_NUMPY, "weighted"])
+@pytest.mark.parametrize("method", [*_NUMPY, "weighted", "quantile"])
 def test_matches_brute_force_groups(seed, method):
     """Random daily grid with NaNs, two spatial labels and a month label, against numpy.
 
@@ -299,9 +299,13 @@ def test_matches_brute_force_groups(seed, method):
         ds,
         by=["region", "zone", "month"],
         method="mean" if method == "weighted" else method,
+        q=[0.0, 0.1, 0.5, 0.9, 1.0] if method == "quantile" else None,
         weights=weights if method == "weighted" else None,
         min_coverage=min_coverage,
     )["precip"]
+    if method == "quantile":
+        assert out.dims == ("quantile", "region", "zone", "month")
+        assert out["quantile"].values.tolist() == [0.0, 0.1, 0.5, 0.9, 1.0]
 
     w = np.broadcast_to(weights.values[:, None], (4, 3))
     checked = 0
@@ -314,20 +318,27 @@ def test_matches_brute_force_groups(seed, method):
                 keep = cells & (share >= min_coverage)
                 if r not in out["region"] or not cells.any():
                     continue
-                got = out.sel(region=r, zone=z, month=m).item()
-                checked += np.isfinite(got)
+                got = out.sel(region=r, zone=z, month=m)
+                checked += np.isfinite(got).any().item()
                 values, cell_w = days[:, keep], np.broadcast_to(w[keep], days[:, keep].shape)
                 if not np.isfinite(values).any():
-                    assert np.isnan(got)
-                elif method == "weighted":
+                    assert np.isnan(got).all()
+                    continue
+                if method == "quantile":
+                    for qv in got["quantile"].values:
+                        expected = np.nanquantile(values, qv)
+                        assert got.sel(quantile=qv).item() == pytest.approx(expected)
+                    continue
+                got = got.item()
+                if method == "weighted":
                     ok = np.isfinite(values)
                     assert got == pytest.approx((values[ok] * cell_w[ok]).sum() / cell_w[ok].sum())
+                    continue
+                expected = _NUMPY[method](values)
+                if np.isnan(expected):
+                    assert np.isnan(got)
                 else:
-                    expected = _NUMPY[method](values)
-                    if np.isnan(expected):
-                        assert np.isnan(got)
-                    else:
-                        assert got == pytest.approx(expected)
+                    assert got == pytest.approx(expected)
     assert checked > 0 or min_coverage == 1.0
 
 
@@ -351,3 +362,46 @@ def test_grouped_mean_of_squares_gives_pooled_rmse(seed):
         ok = np.isfinite(e)
         rmse = np.sqrt((e[ok] ** 2 * cw[ok]).sum() / cw[ok].sum())
         assert np.sqrt(out.sel(region=r).item()) == pytest.approx(rmse)
+
+
+def test_quantile_over_dims_matches_numpy_and_keeps_units():
+    rng = np.random.default_rng(3)
+    ds = make_gridded(n_time=50, lats=(0.0, 60.0), lons=(10.0, 11.0, 12.0), name="t2m")
+    data = rng.normal(15, 5, ds["t2m"].shape)
+    data[rng.random(data.shape) < 0.25] = np.nan
+    ds["t2m"].values[:] = data
+    ds["t2m"].attrs.update(units="degree_Celsius", cell_methods="time: mean")
+    out = run(ds, dims=["time", "longitude"], method="quantile", q=[0.1, 0.9])["t2m"]
+    assert out.dims == ("quantile", "latitude")
+    expected = np.nanquantile(data.transpose(1, 0, 2).reshape(2, -1), [0.1, 0.9], axis=1)
+    np.testing.assert_allclose(out.values, expected)
+    assert out.attrs["units"] == "degree_Celsius"  # a quantile is not a delta
+    assert out.attrs["cell_methods"] == "time: mean time: longitude: quantile (q: 0.1 0.9)"
+
+
+def test_quantile_grouped_cell_methods_and_empty_groups():
+    out = run(_labeled(), by=["region"], method="quantile", q=[0.5])["precip"]
+    # time 0: a = median(0, 1), b = median(3, 4, 5); same as median
+    assert out.sel(quantile=0.5).isel(time=0).values.tolist() == [0.5, 4.0]
+    median = run(_labeled(), by=["region"], method="median")["precip"]
+    np.testing.assert_array_equal(out.sel(quantile=0.5).values, median.values)
+    assert out.attrs["cell_methods"].endswith(
+        "latitude: longitude: quantile (q: 0.5; grouped by region)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"method": "quantile"}, "needs q"),
+        ({"method": "quantile", "q": [0.5, 1.2]}, "in \\[0, 1\\]"),
+        ({"method": "mean", "q": [0.5]}, "only used with method quantile"),
+        ({"method": "quantile", "q": [0.5], "weights": "lat"}, "weighted quantile is not"),
+    ],
+)
+def test_quantile_errors(kwargs, message):
+    ds = make_gridded()
+    if kwargs.get("weights") == "lat":
+        kwargs["weights"] = latitude_weights(ds["latitude"])
+    with pytest.raises(UsageError, match=message):
+        run(ds, dims=["time"], **kwargs)

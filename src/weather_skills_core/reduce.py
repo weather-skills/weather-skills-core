@@ -19,10 +19,12 @@ from weather_skills_core.units import (
     parse_aggregation_period,
 )
 
-METHODS = ("mean", "std", "min", "max", "sum", "median")
+METHODS = ("mean", "std", "min", "max", "sum", "median", "quantile")
 
 
-def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, min_coverage=1.0):
+def summarize(
+    ds, dims=(), by=(), method="mean", q=None, variables=None, weights=None, min_coverage=1.0
+):
     """Reduce ``ds`` with one statistic, over whole dims or per group of label coords.
 
     Modes (pick by which arguments you pass):
@@ -33,6 +35,7 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
     - ``dims`` and ``by``: collapse ``dims`` inside each group as well.
       ``dims=["time"], by=["region"]`` is one value per region over all times.
     - ``weights``: a weighted mean, in any of the modes above.
+    - ``method="quantile"`` with ``q``: quantiles, in any of the modes above.
     - ``min_coverage``: with a ``by`` time label, leave out incomplete groups.
 
     Methods (``METHODS``), all skipping NaN:
@@ -41,6 +44,8 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
     - ``std``: the sample standard deviation (``ddof=1``), NaN from fewer than 2 values.
       Offset units become deltas (``degree_Celsius`` -> ``delta_degC``).
     - ``min``, ``max``, ``median``: as named.
+    - ``quantile``: the ``q`` quantiles (linear interpolation, as ``numpy.quantile``),
+      along a new ``quantile`` dim holding the ``q`` values. Not weighted.
     - ``sum``: the total, NaN (not 0) if every value is NaN. Refused for rates over
       ``time`` or ``step`` (``mm day-1``) and for offset units (``degree_Celsius``).
 
@@ -53,6 +58,7 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
             combine (region and month give each region in each month). The ``""`` label is
             left out, and a combination with no cells is NaN.
         method: One of ``METHODS``.
+        q: With ``method="quantile"`` only: quantiles to compute, each in [0, 1].
         variables: Data variables to reduce; default all. The others pass through
             unchanged, as do variables missing a grouped dim.
         weights: DataArray on some of ``ds``'s dims, such as ``latitude_weights`` for
@@ -64,19 +70,30 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
             are pooled. Missing steps are never filled. Default 1.0: complete groups only.
 
     Returns:
-        Quantified Dataset. Collapsed dims are gone and each ``by`` label is a dim. Other
+        Quantified Dataset. Collapsed dims are gone and each ``by`` label is a dim (after
+        a ``quantile`` dim, for ``method="quantile"``). Other
         label coords on the grouped dims are dropped. ``cell_methods`` records the step
         (``time: mean (grouped by region)``). A ``sum`` kept below full coverage adds
         ``<var>_coverage``. Left-out cells and partial sums are reported on stderr.
 
     Raises:
         UsageError: an unknown dim, label, variable or method; labels that share some but
-            not all dims; weights with a method other than mean; a refused sum; a time
+            not all dims; weights with a method other than mean; ``q`` missing, out of
+            [0, 1], or given without ``method="quantile"``; a refused sum; a time
             label whose calendar period cannot be counted.
         DataError: a label whose every value is ``""``.
     """
     if method not in METHODS:
         raise UsageError(f"method {method!r} is not one of {', '.join(METHODS)}")
+    if method == "quantile":
+        if not q:
+            raise UsageError("method quantile needs q, the quantiles to compute (e.g. 0.1 0.9)")
+        if any(not 0.0 <= x <= 1.0 for x in q):
+            raise UsageError(f"q must each be in [0, 1]; got {list(q)}")
+        if "quantile" in ds.dims:
+            raise UsageError("dataset already has a quantile dim")
+    elif q:
+        raise UsageError(f"q is only used with method quantile, not {method}")
     dims = list(dict.fromkeys(dims or []))
     by = list(dict.fromkeys(by or []))
     if not dims and not by:
@@ -90,7 +107,10 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
             raise UsageError(f"by {b!r} is not a label coord (have {labels})")
     if weights is not None:
         if method != "mean":
-            raise UsageError(f"weights need method mean, not {method}")
+            raise UsageError(
+                f"weights need method mean, not {method}"
+                + ("; a weighted quantile is not supported" if method == "quantile" else "")
+            )
         if not set(weights.dims) <= set(ds.dims):
             raise UsageError(f"weights dims {weights.dims} are not all dataset dims")
     if not 0.0 <= min_coverage <= 1.0:
@@ -259,9 +279,11 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
         da = da.pint.dequantify()  # values are filled into numpy; units go back on below
         kept = [d for d in da.dims if d not in rdims]
         shape = [da.sizes[d] for d in kept] + [label_values[b].size for b in by]
+        # quantile adds a leading quantile dim, as xarray's quantile does.
+        qdims = ["quantile"] if method == "quantile" else []
         # Combinations of labels with no cells stay NaN.
         dtype = np.result_type(da.dtype, np.float32, *([] if w is None else [w.dtype]))
-        values = np.full(shape, np.nan, dtype=dtype)
+        values = np.full([len(q), *shape] if qdims else shape, np.nan, dtype=dtype)
         coverage = np.full(shape, np.nan)
         dropped = 0
         for parts in itertools.product(*groups):
@@ -294,16 +316,19 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
                 reduced = sub.sum(dim=rdims, min_count=1)  # all-NaN → NaN, not 0
             elif method == "std":
                 reduced = sub.std(dim=rdims, ddof=1)
+            elif method == "quantile":
+                reduced = sub.quantile(list(q), dim=rdims, skipna=True)
             else:
                 reduced = getattr(sub, method)(dim=rdims)
             where = {b: i for group in parts for b, i in group["labels"].items()}
             at = (..., *(where[b] for b in by))
-            values[at] = reduced.transpose(*kept).values
+            values[at] = reduced.transpose(*qdims, *kept).values
             if time_by:
                 coverage[at] = share.transpose(*kept).values
         coords = {
             **{c: v for c, v in da.coords.items() if set(v.dims) <= set(kept)},
             **{b: label_values[b] for b in by},
+            **({"quantile": np.asarray(q, dtype=float)} if qdims else {}),
         }
         if dropped:
             print(
@@ -313,7 +338,7 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
             )
         out[var] = xr.DataArray(
             values if units is None else values * units,
-            dims=[*kept, *by],
+            dims=[*qdims, *kept, *by],
             coords=coords,
             attrs=da.attrs,
         )
@@ -343,8 +368,10 @@ def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, m
         attrs = dict(out[var].attrs)
         cf_method = {"std": "standard_deviation", "min": "minimum", "max": "maximum"}
         step = f"{': '.join(rdims)}: {cf_method.get(method, method)}"
-        if by:
-            step += f" (grouped by {', '.join(by)})"
+        notes = [f"q: {' '.join(f'{x:g}' for x in q)}"] if qdims else []
+        notes += [f"grouped by {', '.join(by)}"] if by else []
+        if notes:
+            step += f" ({'; '.join(notes)})"
         attrs["cell_methods"] = (
             f"{attrs['cell_methods']} {step}" if attrs.get("cell_methods") else step
         )
