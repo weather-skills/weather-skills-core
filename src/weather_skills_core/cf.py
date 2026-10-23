@@ -126,8 +126,18 @@ def cf_dim(obj, cf_name: str):
         return None
 
 
+def measured_variables(ds) -> list[str]:
+    """Data variables that are not another variable's ancillary (such as its coverage)."""
+    ancillary = {
+        a
+        for da in ds.data_vars.values()
+        for a in str(da.attrs.get("ancillary_variables", "")).split()
+    }
+    return [name for name in ds.data_vars if name not in ancillary]
+
+
 def auto_variable(ds):
-    """Pick a real data var, skipping CF grid-mapping (CRS) containers.
+    """Pick a real data var, skipping CF grid-mapping (CRS) containers and ancillaries.
 
     Prefers a var with ≥2 dims; returns None if nothing suitable remains.
     """
@@ -136,7 +146,7 @@ def auto_variable(ds):
     }
     candidates = [
         v
-        for v in ds.data_vars
+        for v in measured_variables(ds)
         if "grid_mapping_name" not in ds[v].attrs and v not in mapping_targets
     ]
     if not candidates:

@@ -78,7 +78,8 @@ changes cell width must pass `period=`, which overwrites the old stamp.
 | Attr | Where | Meaning |
 | --- | --- | --- |
 | `aggregation_period` | data variable (pint string) | Length of each aggregated interval (`7 day`, `21 day`) |
-| `aggregation_coverage` | time/step coordinate, 0–1 | Fraction of native samples with finite data in that interval (all-NaN times do not count) |
+| `<var>_coverage` | data variable on the variable's own dims, 0–1, listed in its `ancillary_variables` | Share of the interval each cell (grid cell, station, member) has data for |
+| `aggregation_coverage` | time/step coordinate, 0–1 | The largest `<var>_coverage` in that interval: below 1, no cell is complete |
 | `cell_methods` | data variable | The operation (`time: mean`, `time: sum`) |
 
 `data_interval` is not the aggregation window. Convert-to-totals
@@ -112,7 +113,9 @@ rewrites leftover rate display names containing `rate` or `flux` to
 - a stamped `aggregation_period` (run `aggregate-temporal` first —
   native-only cubes will not convert)
 - coverage at or above `--min-coverage` (default 1.0). Aggregation
-  keeps incomplete bins and only stamps coverage; this flag drops them
+  keeps incomplete bins and cells and only stamps coverage; this flag
+  drops intervals with no complete cell and blanks each cell whose
+  `<var>_coverage` is below it
 - non-overlapping intervals (sample spacing ≥ `aggregation_period`)
 - rate inputs — precip totals are refused
 
@@ -130,7 +133,8 @@ axis (one aggregated bin) skips the overlap check.
    (`kg m-2` / `mm` → amount, `kg m-2 s-1` / `mm day-1` → rate). If
    units are present but not convertible to a precip rate or amount,
    the name hint is ignored (`precipitation_quality_index_surface`
-   with `units="1"` is not precip).
+   with `units="1"` is not precip). Likewise for temperature and pressure
+   hints: `t2m_coverage` in `"1"` is not a temperature.
 
 Units alone do **not** classify a variable. A bare `kg m-2 s-1` field
 is not treated as precip.
@@ -147,7 +151,9 @@ is not treated as precip.
 | `stamp_precip_amounts` | Amount units → amount CF `standard_name`; rewrite rate display names |
 | `rate_to_total` | Rate × period → amount (refuses precip totals) |
 | `parse_aggregation_period` | Parse an `aggregation_period` / duration string |
-| `filter_min_coverage` | Drop aggregated intervals below a coverage threshold |
+| `filter_min_coverage` | Drop intervals with no complete cell; blank cells below the threshold |
+| `coverage_variable` | A variable's per-cell `<var>_coverage`, or None |
+| `cf.measured_variables` | Data variables that are not another variable's ancillary |
 
 ## Author checklist
 
@@ -155,8 +161,11 @@ is not treated as precip.
 - Fetch writes accumulated variables as rates (`mm day-1`).
 - After fetch: `data_interval` **or** CF `{dim}_bounds`, and no
   `aggregation_period`.
-- After `aggregate-temporal`: `aggregation_period` +
+- After `aggregate-temporal`: `aggregation_period` + `<var>_coverage` +
   `aggregation_coverage` + `cell_methods`.
+- A skill that processes "all variables" loops over
+  `measured_variables(ds)`, not `ds.data_vars`, so it does not treat a
+  `<var>_coverage` as data.
 - Convert to amounts with `convert-to-totals` only when you need
   totals for display — and never feed those totals back into
   rate-math skills.

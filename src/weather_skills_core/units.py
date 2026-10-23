@@ -49,6 +49,7 @@ import cf_xarray.units  # noqa: F401 — CF/UDUNITS strings on the pint registry
 import numpy as np
 import pint_xarray
 
+from weather_skills_core.cf import measured_variables
 from weather_skills_core.errors import UsageError
 
 ureg = pint_xarray.unit_registry
@@ -74,6 +75,10 @@ AGGREGATION_PERIOD_ATTR = "aggregation_period"
 # Coordinate on the aggregated time/step axis: completeness of each interval
 # vs ``data_interval`` (0–1). Stamped by aggregate-temporal only.
 AGGREGATION_COVERAGE_COORD = "aggregation_coverage"
+
+# Per-cell coverage: ``<var>_coverage`` (0–1) on the variable's own dims, the share of
+# each interval with data at that cell, listed in the variable's ``ancillary_variables``.
+COVERAGE_SUFFIX = "_coverage"
 
 _TIME = r"(?:second|sec|minute|min|hour|hr|day|s|h|d)"
 _RATE_RE = re.compile(
@@ -255,6 +260,13 @@ def classify_variable(name: str, *, units=None, standard_name=None) -> str | Non
                     # Not precip units after all (prmsl starts with "pr"): try the next kind.
                     continue
                 return found
+            if kind == "temp" and isinstance(units, str) and units.strip():
+                # A temperature-named coverage or index in "1" is not a temperature.
+                if not (
+                    units_convertible(units, STANDARD["temp"]["units"])
+                    or units_convertible(units, "delta_degC")
+                ):
+                    continue
             if kind == "pressure" and isinstance(units, str) and units.strip():
                 # A pressure-named anomaly in "1" or sigma is not a pressure.
                 if not units_convertible(units, STANDARD["pressure"]["units"]):
@@ -600,7 +612,7 @@ def to_standard_units(ds, variables=None):
     is left untouched. Unrecognized or unitless variables are unchanged.
     Raises ``UsageError`` if a classified variable cannot be converted.
     """
-    names = list(variables) if variables is not None else list(ds.data_vars)
+    names = list(variables) if variables is not None else measured_variables(ds)
     out = ds
     dirty = False
     for name in names:
@@ -830,32 +842,51 @@ def coverage_values(ds, dim: str):
     return np.ones(n, dtype=float)
 
 
-def filter_min_coverage(ds, dim: str, min_coverage: float):
-    """Drop intervals whose ``aggregation_coverage`` is below ``min_coverage``.
+def coverage_variable(ds, name: str):
+    """The per-cell coverage of variable ``name``, or None.
 
-    Raises if nothing remains. Missing coverage is treated as 1.0.
+    It is ``<name>_coverage``, listed in ``name``'s ``ancillary_variables``.
+    """
+    cov = f"{name}{COVERAGE_SUFFIX}"
+    listed = str(ds[name].attrs.get("ancillary_variables", "")).split()
+    return ds[cov] if cov in listed and cov in ds.data_vars else None
+
+
+def filter_min_coverage(ds, dim: str | None, min_coverage: float):
+    """Drop intervals and blank cells whose coverage is below ``min_coverage``.
+
+    Along ``dim``, intervals whose ``aggregation_coverage`` (missing: 1.0) is below the
+    threshold are dropped; raises if nothing remains. Then each cell of a variable
+    with a per-cell ``<var>_coverage`` below the threshold is NaN. With ``dim=None``
+    (no interval axis), only cells are blanked.
     """
     if min_coverage < 0 or min_coverage > 1:
         raise UsageError(f"--min-coverage must be in [0, 1]; got {min_coverage}")
-    if dim not in ds.dims:
-        raise UsageError(f"dimension {dim!r} not in dataset (have {list(ds.dims)})")
-    if ds.sizes[dim] == 0:
-        raise UsageError(f"no {dim} intervals to convert (empty {dim} axis).")
-    cov = coverage_values(ds, dim)
-    if cov.size != ds.sizes[dim]:
-        raise UsageError(
-            f"{AGGREGATION_COVERAGE_COORD!r} length {cov.size} does not match "
-            f"{dim!r} size {ds.sizes[dim]}"
-        )
-    keep = cov >= min_coverage - 1e-12
-    if not np.any(keep):
-        raise UsageError(
-            f"no {dim} intervals meet --min-coverage {min_coverage} "
-            f"(coverage {np.array2string(cov, precision=3)})"
-        )
-    if np.all(keep):
-        return ds
-    return ds.isel({dim: keep})
+    if dim is not None:
+        if dim not in ds.dims:
+            raise UsageError(f"dimension {dim!r} not in dataset (have {list(ds.dims)})")
+        if ds.sizes[dim] == 0:
+            raise UsageError(f"no {dim} intervals to convert (empty {dim} axis).")
+        cov = coverage_values(ds, dim)
+        if cov.size != ds.sizes[dim]:
+            raise UsageError(
+                f"{AGGREGATION_COVERAGE_COORD!r} length {cov.size} does not match "
+                f"{dim!r} size {ds.sizes[dim]}"
+            )
+        keep = cov >= min_coverage - 1e-12
+        if not np.any(keep):
+            raise UsageError(
+                f"no {dim} intervals meet --min-coverage {min_coverage} "
+                f"(coverage {np.array2string(cov, precision=3)})"
+            )
+        if not np.all(keep):
+            ds = ds.isel({dim: keep})
+    out = ds.copy(deep=False)
+    for name in measured_variables(ds):
+        cov = coverage_variable(ds, name)
+        if cov is not None:
+            out[name] = ds[name].where(cov >= min_coverage - 1e-12)
+    return out
 
 
 def _step_delta_days(ds):
