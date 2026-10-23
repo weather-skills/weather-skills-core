@@ -1,4 +1,4 @@
-"""Collapse dimensions of a Dataset, whole or per group of a label coord, with one statistic."""
+"""Reduce a Dataset with one statistic, over whole dims or per group of label coords."""
 
 import datetime
 import itertools
@@ -25,30 +25,57 @@ _INITIALS = "JFMAMJJASOND"
 
 
 def summarize(ds, dims=(), by=(), method="mean", variables=None, weights=None, min_coverage=1.0):
-    """Collapse ``dims`` of ``ds``, or each group of the ``by`` label coords, with ``method``.
+    """Reduce ``ds`` with one statistic, over whole dims or per group of label coords.
 
-    ``ds`` is quantified, as ``@weather_skill`` passes inputs; the result is too.
+    Modes (pick by which arguments you pass):
 
-    ``dims`` are dimensions to collapse; ``by`` are non-dimension label coords (a county or
-    a season label) whose dims collapse to one entry per label. Labels on the same dims
-    match together; labels on different dims combine as a product. The ``""`` label is
-    left out, and other label coords on the grouped dims are dropped.
+    - ``dims`` only: collapse those dims. ``dims=["time"]`` is a time mean per cell.
+    - ``by`` only: one value per label. ``by=["region"]`` collapses the dims that
+      ``region`` spans (e.g. latitude and longitude) into a ``region`` dim.
+    - ``dims`` and ``by``: collapse ``dims`` inside each group as well.
+      ``dims=["time"], by=["region"]`` is one value per region over all times.
+    - ``weights``: a weighted mean, in any of the modes above.
+    - ``min_coverage``: with a ``by`` time label, leave out incomplete groups.
 
-    ``method`` is one of ``METHODS``. NaNs are skipped; ``sum`` of an all-NaN slice is NaN
-    and ``std`` is the sample standard deviation (``ddof=1``). ``sum`` over time or step of
-    a rate is refused.
+    Methods (``METHODS``), all skipping NaN:
 
-    ``weights`` (``method="mean"`` only) is a DataArray on some of the data's dims, such
-    as ``latitude_weights``; each value counts in proportion to its weight, NaN values and
-    their weights left out. It works with or without ``by``.
+    - ``mean``: the mean; with ``weights``, ``sum(w * x) / sum(w)`` over non-NaN values.
+    - ``std``: the sample standard deviation (``ddof=1``), NaN from fewer than 2 values.
+      Offset units become deltas (``degree_Celsius`` -> ``delta_degC``).
+    - ``min``, ``max``, ``median``: as named.
+    - ``sum``: the total, NaN (not 0) if every value is NaN. Refused for rates over
+      ``time`` or ``step`` (``mm day-1``) and for offset units (``degree_Celsius``).
 
-    With a ``by`` label along time (one of ``TIME_LABELS``), each input cell (station,
-    grid cell, member) whose data cover less than ``min_coverage`` (0-1) of a group's full
-    calendar period is left out before any other reduction; missing steps are never
-    filled. A ``sum`` kept below full coverage writes ``<var>_coverage``.
+    Args:
+        ds: Quantified Dataset, as ``@weather_skill`` passes inputs.
+        dims: Dims to collapse.
+        by: Label coords to group by: coords that are not dims, such as a county name on
+            (latitude, longitude) or a season on time. Labels on the same dims are matched
+            together (region and zone give each region-zone pair); labels on different dims
+            combine (region and month give each region in each month). The ``""`` label is
+            left out, and a combination with no cells is NaN.
+        method: One of ``METHODS``.
+        variables: Data variables to reduce; default all. The others pass through
+            unchanged, as do variables missing a grouped dim.
+        weights: DataArray on some of ``ds``'s dims, such as ``latitude_weights`` for
+            area. ``method="mean"`` only. A variable without those dims gets a plain mean.
+        min_coverage: 0-1, used only with a ``by`` label along time (one of
+            ``TIME_LABELS``, as label-group writes them). For each group, each input cell
+            (grid cell, station, member) with data for less than this share of the
+            group's full calendar period (all 92 days of a MAM) is left out before cells
+            are pooled. Missing steps are never filled. Default 1.0: complete groups only.
 
-    Only ``variables`` (default: all) carrying every grouped dim are summarized; others
-    pass through. A collapsed dim is removed once no variable carries it.
+    Returns:
+        Quantified Dataset. Collapsed dims are gone and each ``by`` label is a dim. Other
+        label coords on the grouped dims are dropped. ``cell_methods`` records the step
+        (``time: mean (grouped by region)``). A ``sum`` kept below full coverage adds
+        ``<var>_coverage``. Left-out cells and partial sums are reported on stderr.
+
+    Raises:
+        UsageError: an unknown dim, label, variable or method; labels that share some but
+            not all dims; weights with a method other than mean; a refused sum; a time
+            label whose calendar period cannot be counted.
+        DataError: a label whose every value is ``""``.
     """
     if method not in METHODS:
         raise UsageError(f"method {method!r} is not one of {', '.join(METHODS)}")
