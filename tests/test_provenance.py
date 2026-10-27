@@ -196,6 +196,38 @@ def test_visualization_html_non_ascii_payload(tmp_path):
     assert path.read_text(encoding="utf-8").count('name="weather_skills_history"') == 1
 
 
+def test_visualization_pdf(tmp_path):
+    path = tmp_path / "x.pdf"
+    Image.new("RGB", (40, 30), color=(200, 200, 200)).save(path)
+    chain = [{**entry(), "args": {"title": "Rain — week 1"}}]
+    provenance.stamp_figure(path, chain)
+    assert provenance.load_figure_history(path) == chain
+    # Restamping replaces the key rather than adding a second one.
+    chain2 = [*chain, entry()]
+    provenance.stamp_figure(path, chain2)
+    assert provenance.load_figure_history(path) == chain2
+
+
+def test_visualization_svg(tmp_path):
+    path = tmp_path / "x.svg"
+    path.write_text(
+        '<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">'
+        '<rect width="4" height="4"/></svg>',
+        encoding="utf-8",
+    )
+    chain = [{**entry(), "args": {"title": "Rain <b>—</b> & week 1"}}]
+    provenance.stamp_figure(path, chain)
+    assert provenance.load_figure_history(path) == chain
+    chain2 = [*chain, entry()]
+    provenance.stamp_figure(path, chain2)
+    assert provenance.load_figure_history(path) == chain2
+    text = path.read_text(encoding="utf-8")
+    assert text.count("<metadata") == 1
+    import xml.etree.ElementTree as ET
+
+    ET.fromstring(text.split("?>", 1)[1])  # still well-formed XML
+
+
 def test_visualization_jpeg(tmp_path):
     path = tmp_path / "x.jpg"
     Image.new("RGB", (4, 4)).save(path, quality=90)

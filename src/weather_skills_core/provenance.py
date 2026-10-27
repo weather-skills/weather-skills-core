@@ -26,6 +26,9 @@ _HTML_META_RE = re.compile(
     rf'<meta\s+name=["\']{re.escape(HISTORY_ATTR)}["\']\s+content=["\'](.*?)["\']\s*/?>',
     re.IGNORECASE | re.DOTALL,
 )
+_SVG_META_RE = re.compile(
+    rf'<metadata\s+id=["\']{re.escape(HISTORY_ATTR)}["\']\s*>(.*?)</metadata>', re.DOTALL
+)
 
 
 def hash_zarr(zarr_path: Path) -> str:
@@ -376,11 +379,11 @@ def restamp_zarr(zarr_path: Path, history: list) -> None:
 
 
 def stamp_figure(path: Path, history: list) -> None:
-    """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, or HTML file.
+    """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, HTML, PDF, or SVG file.
 
     When the chain is intact (non-empty and schema-valid), also draw a circular
     old-school ``weather-skills provenance verified`` rubber stamp on PNG/JPEG
-    pixels and every GIF frame (bottom-right). HTML gets metadata only.
+    pixels and every GIF frame (bottom-right). HTML, PDF and SVG get metadata only.
     """
     from weather_skills_core.errors import SkillError
 
@@ -454,8 +457,28 @@ def stamp_figure(path: Path, history: list) -> None:
         path.write_text(text, encoding="utf-8")
         return
 
+    if suffix == ".pdf":
+        from pypdf import PdfWriter
+
+        # A custom key in the document info dictionary; viewers ignore it.
+        writer = PdfWriter(clone_from=path)
+        writer.add_metadata({f"/{HISTORY_ATTR}": payload})
+        writer.write(path)
+        return
+
+    if suffix == ".svg":
+        text = path.read_text(encoding="utf-8")
+        meta = f'<metadata id="{HISTORY_ATTR}">{html.escape(payload, quote=False)}</metadata>'
+        if _SVG_META_RE.search(text):
+            text = _SVG_META_RE.sub(lambda m: meta, text, count=1)
+        else:
+            text = re.sub(r"(<svg\b[^>]*>)", lambda m: f"{m.group(1)}{meta}", text, count=1)
+        path.write_text(text, encoding="utf-8")
+        return
+
     raise SkillError(
-        f"unsupported figure type {suffix!r} for {path}; expected .png, .jpg/.jpeg, .gif, or .html/.htm"
+        f"unsupported figure type {suffix!r} for {path}; expected .png, .jpg/.jpeg, .gif, "
+        ".html/.htm, .pdf, or .svg"
     )
 
 
@@ -498,5 +521,15 @@ def load_figure_history(path: Path) -> list | None:
         if not m:
             return None
         return coerce_chain(html.unescape(m.group(1)), path.name)
+
+    if suffix == ".pdf":
+        from pypdf import PdfReader
+
+        raw = (PdfReader(path).metadata or {}).get(f"/{HISTORY_ATTR}")
+        return coerce_chain(str(raw), path.name) if raw else None
+
+    if suffix == ".svg":
+        m = _SVG_META_RE.search(path.read_text(encoding="utf-8"))
+        return coerce_chain(html.unescape(m.group(1)), path.name) if m else None
 
     return None
