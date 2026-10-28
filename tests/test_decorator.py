@@ -266,6 +266,22 @@ def test_run_loop_start_after_end_exits(tmp_path):
     assert exc.value.code == 2
 
 
+def test_run_loop_output_inside_a_file_exits_before_running(tmp_path, capsys):
+    (tmp_path / "check.csv").write_text("a,b\n")
+    ran = []
+
+    @weather_skill(name="s", version="0.1.0")
+    def skill(output, **kwargs):
+        ran.append(True)
+        return make_gridded()
+
+    with pytest.raises(SystemExit) as exc:
+        skill(["-o", str(tmp_path / "check.csv" / "out.zarr")])
+    assert exc.value.code == 2
+    assert not ran
+    assert "which is a file" in capsys.readouterr().err
+
+
 def test_run_loop_date_parsed(tmp_path):
     out = tmp_path / "out.zarr"
     seen = {}

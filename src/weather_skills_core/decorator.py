@@ -388,6 +388,14 @@ def weather_skill(
                 output_paths: list[Path] = []
                 if output:
                     output_paths = [Path(p) for p in (args.output or [])]
+                    # Fail before the skill runs, not after a long fetch.
+                    for path in output_paths:
+                        blocker = next((p for p in path.parents if p.is_file()), None)
+                        if blocker is not None:
+                            raise UsageError(
+                                f"--output {path} is inside {blocker}, which is a file, "
+                                "not a folder; pass a path under a folder"
+                            )
                     if not output_paths:
                         params["output"] = None
                     else:
