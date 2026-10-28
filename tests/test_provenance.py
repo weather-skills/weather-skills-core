@@ -1,12 +1,15 @@
 """Provenance helpers: history load/stamp and figure metadata."""
 
+import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from conftest import make_gridded
 from PIL import Image
 
 from weather_skills_core import provenance
+from weather_skills_core.errors import SkillError
 
 
 def write_store(path, history=None, fill=1.0):
@@ -196,6 +199,103 @@ def test_visualization_html_non_ascii_payload(tmp_path):
     assert path.read_text(encoding="utf-8").count('name="weather_skills_history"') == 1
 
 
+def test_visualization_pdf(tmp_path):
+    path = tmp_path / "x.pdf"
+    Image.new("RGB", (40, 30), color=(200, 200, 200)).save(path)
+    chain = [{**entry(), "args": {"title": "Rain — week 1"}}]
+    provenance.stamp_figure(path, chain)
+    assert provenance.load_figure_history(path) == chain
+    # Restamping replaces the key rather than adding a second one.
+    chain2 = [*chain, entry()]
+    provenance.stamp_figure(path, chain2)
+    assert provenance.load_figure_history(path) == chain2
+
+
+def test_visualization_svg(tmp_path):
+    path = tmp_path / "x.svg"
+    path.write_text(
+        '<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">'
+        '<rect width="4" height="4"/></svg>',
+        encoding="utf-8",
+    )
+    chain = [{**entry(), "args": {"title": "Rain <b>—</b> & week 1"}}]
+    provenance.stamp_figure(path, chain)
+    assert provenance.load_figure_history(path) == chain
+    chain2 = [*chain, entry()]
+    provenance.stamp_figure(path, chain2)
+    assert provenance.load_figure_history(path) == chain2
+    text = path.read_text(encoding="utf-8")
+    assert text.count("<metadata") == 1
+    import xml.etree.ElementTree as ET
+
+    ET.fromstring(text.split("?>", 1)[1])  # still well-formed XML
+
+
+def test_visualization_pdf_official_mark_when_intact(tmp_path):
+    from pypdf import PdfReader
+
+    path = tmp_path / "marked.pdf"
+    Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
+    header = PdfReader(path).pdf_header
+    provenance.stamp_figure(path, [entry()])
+    reader = PdfReader(path)
+    # The stamp is drawn over the page in the stamp ink; the PDF version is kept.
+    ink = " ".join(f"{c / 255:.3f}" for c in provenance._MARK_INK[:3]).encode()
+    assert ink + b" RG" in reader.pages[0].get_contents().get_data()
+    assert reader.pdf_header == header
+
+    path = tmp_path / "invalid.pdf"
+    Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
+    provenance.stamp_figure(path, [{"skill": "", "version": "0", "args": {}, "input": None}])
+    assert ink not in PdfReader(path).pages[0].get_contents().get_data()
+
+
+def test_visualization_pdf_restamp_replaces_mark(tmp_path):
+    from pypdf import PdfReader
+
+    path = tmp_path / "restamp.pdf"
+    Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
+    for _ in range(3):
+        provenance.stamp_figure(path, [entry()])
+    data = PdfReader(path).pages[0].get_contents().get_data()
+    assert data.count(b"/weather_skills_stamp BMC") == 1
+    # A broken chain removes the stamp but keeps the history.
+    provenance.stamp_figure(path, [{"skill": "", "version": "0", "args": {}, "input": None}])
+    assert b"weather_skills_stamp" not in PdfReader(path).pages[0].get_contents().get_data()
+    assert provenance.load_figure_history(path) is not None
+
+
+def test_visualization_svg_official_mark_when_intact(tmp_path):
+    path = tmp_path / "marked.svg"
+    path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" '
+        'viewBox="0 0 400 300"><rect width="400" height="300"/></svg>',
+        encoding="utf-8",
+    )
+    provenance.stamp_figure(path, [entry()])
+    provenance.stamp_figure(path, [entry()])
+    text = path.read_text(encoding="utf-8")
+    # One stamp after a restamp, drawn last so it sits on top.
+    assert text.count('id="weather_skills_stamp"') == 1
+    assert text.index('id="weather_skills_stamp"') > text.index("<rect")
+    # A broken chain removes the stamp but keeps the history.
+    provenance.stamp_figure(path, [{"skill": "", "version": "0", "args": {}, "input": None}])
+    text = path.read_text(encoding="utf-8")
+    assert "weather_skills_stamp" not in text
+    assert provenance.load_figure_history(path) is not None
+
+
+def test_visualization_svg_official_mark_without_viewbox(tmp_path):
+    path = tmp_path / "plain.svg"
+    path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="400px" height="300">'
+        '<rect width="400" height="300"/></svg>',
+        encoding="utf-8",
+    )
+    provenance.stamp_figure(path, [entry()])
+    assert path.read_text(encoding="utf-8").count('id="weather_skills_stamp"') == 1
+
+
 def test_visualization_jpeg(tmp_path):
     path = tmp_path / "x.jpg"
     Image.new("RGB", (4, 4)).save(path, quality=90)
@@ -280,3 +380,64 @@ def test_visualization_jpeg_official_mark_when_intact(tmp_path):
     assert provenance.load_figure_history(path) == chain
     after = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
     assert before != after
+
+
+def test_geojson_history_is_a_top_level_member(tmp_path):
+    path = tmp_path / "region.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
+    chain = [entry()]
+    provenance.stamp_figure(path, chain)
+    doc = json.loads(path.read_text())
+    assert doc["type"] == "FeatureCollection"
+    assert json.loads(doc[provenance.HISTORY_ATTR]) == chain
+    assert provenance.load_figure_history(path) == chain
+
+
+def test_json_list_output_is_refused(tmp_path):
+    path = tmp_path / "values.json"
+    path.write_text("[1, 2, 3]")
+    with pytest.raises(SkillError, match="not an object"):
+        provenance.stamp_figure(path, [entry()])
+    assert path.read_text() == "[1, 2, 3]"
+
+
+@pytest.mark.parametrize("name", ["table.csv", "table.xlsx"])
+def test_table_history_lives_in_a_sidecar_tied_to_its_hash(tmp_path, name):
+    path = tmp_path / name
+    path.write_bytes(b"time,precip\n2026-01-01,1.0\n")
+    chain = [entry()]
+    provenance.stamp_figure(path, chain)
+    assert path.read_bytes() == b"time,precip\n2026-01-01,1.0\n"
+    assert provenance.history_sidecar(path).name == f"{name}.history.json"
+    assert provenance.load_figure_history(path) == chain
+
+    # Edited after the skill wrote it: the history no longer describes it.
+    path.write_bytes(b"time,precip\n2026-01-01,2.0\n")
+    assert provenance.load_figure_history(path) is None
+    assert not provenance.can_replace_output(path)
+
+
+def test_can_replace_output(tmp_path):
+    assert provenance.can_replace_output(tmp_path / "missing.png")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert provenance.can_replace_output(empty)
+
+    mine = tmp_path / "notes.csv"
+    mine.write_text("a,b\n")
+    assert not provenance.can_replace_output(mine)
+    provenance.stamp_figure(mine, [entry()])
+    assert provenance.can_replace_output(mine)
+
+    not_an_image = tmp_path / "fake.png"
+    not_an_image.write_text("hello")
+    assert not provenance.can_replace_output(not_an_image)
+
+    bad_geojson = tmp_path / "bad.geojson"
+    bad_geojson.write_text("{")
+    assert not provenance.can_replace_output(bad_geojson)
+
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("keep")
+    assert not provenance.can_replace_output(folder)

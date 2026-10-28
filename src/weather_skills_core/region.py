@@ -623,14 +623,43 @@ def lookup_region(query: str) -> dict:
     split = _split_subnational(cleaned)
     if split is not None:
         country, remainder = split
-        found = _find_admin(country, remainder)
-        if found is not None:
-            return found
+        # The key exactly as written wins, so every key an ambiguity error
+        # lists below selects its own region.
+        hit = _find_admin(country, remainder)
+        if hit is not None:
+            return hit
+        # A hyphen may also stand for the space in a name (kenya-west-pokot for
+        # West Pokot, cleaned to west_pokot), so try each reading of the hyphens:
+        # as written, all as spaces, and as spaces on either side of one level break.
+        parts = remainder.split("-")
+        readings = [remainder, "_".join(parts)]
+        for i in range(1, len(parts)):
+            readings.append(f"{'_'.join(parts[:i])}-{'_'.join(parts[i:])}")
+        found = {}
+        for reading in dict.fromkeys(readings):
+            hit = _find_admin(country, reading)
+            if hit is not None:
+                props = hit["properties"]
+                found.setdefault((props["level"], props["name"]), hit)
+        if len(found) == 1:
+            return next(iter(found.values()))
         iso3 = country["properties"]["iso3"]
         country_name = country["properties"]["name"]
+        if found:
+            keys = ", ".join(hit["properties"]["region_name"] for hit in found.values())
+            raise DataError(
+                f"{query!r} matches more than one region of {country_name} ({iso3}): "
+                f"{keys}. Pass one of these keys."
+            )
+        import difflib
+
+        by1, by2 = _admin_indexes(iso3)
+        country_key = clean_region_name(country_name)
+        close = difflib.get_close_matches(remainder, [*by1, *by2], n=3)
+        hint = f" Did you mean {', '.join(f'{country_key}-{c}' for c in close)}?" if close else ""
         raise DataError(
             f"{query!r} is not a known admin-1 or admin-2 region of {country_name} "
-            f"({iso3}) in geoBoundaries gbOpen. Pass country-admin1 or "
+            f"({iso3}) in geoBoundaries gbOpen.{hint} Pass country-admin1 or "
             "country-admin1-admin2 after cleaning "
             "(e.g. kenya-nairobi, united_states_of_america-california-los_angeles)."
         )

@@ -85,8 +85,11 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
     """
     entry_args = {k: v for k, v in vars(args).items() if k not in strip_dests}
     for dest in ("date", "start_time", "end_time"):
-        if dest in params and params[dest] is not None:
-            entry_args[dest] = params[dest].isoformat()
+        value = params.get(dest)
+        if isinstance(value, list):
+            entry_args[dest] = [d.isoformat() for d in value]
+        elif value is not None:
+            entry_args[dest] = value.isoformat()
     entry_args = json.loads(json.dumps(entry_args, default=_history_json_default))
 
     if not input_paths:
@@ -166,12 +169,11 @@ def write_output(value, out_path, history, first_ds):
         value.attrs = {**first_ds.attrs, **value.attrs}
     value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
-    if out_path.exists() and not out_path.is_dir():
-        raise UsageError(
-            f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
-        )
-    if out_path.exists():
+    # The wrapper already checked that an existing --output is ours to replace.
+    if out_path.is_dir():
         shutil.rmtree(out_path)
+    elif out_path.exists():
+        out_path.unlink()
     try:
         value.to_zarr(out_path, mode="w", consolidated=True)
     except Exception:
@@ -190,7 +192,22 @@ def _open_zarr(path, io_spec=None):
     from weather_skills_core.standard_utils import normalize_latlon_coords, normalize_step_coord
     from weather_skills_core.units import normalize_unit_strings, quantify_dataset
 
-    ds = xr.open_zarr(path, consolidated=True)
+    if path.is_file():
+        import zipfile
+
+        if not zipfile.is_zipfile(path):
+            with path.open("rb") as f:
+                magic = f.read(4)
+            if magic in (b"CDF\x01", b"CDF\x02", b"\x89HDF"):
+                raise UsageError(
+                    f"{path} is a NetCDF file, not a Zarr store; convert it to a Zarr first"
+                )
+            raise UsageError(f"{path} is a file, not a Zarr store (a folder or a zipped Zarr)")
+        store, group = provenance_mod.zipped_zarr(path)
+        # Unconsolidated: consolidated reads miss a store one folder down in the zip.
+        ds = xr.open_zarr(store, group=group, consolidated=False)
+    else:
+        ds = xr.open_zarr(path, consolidated=True)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))
     ds = normalize_unit_strings(ds)
@@ -388,6 +405,29 @@ def weather_skill(
                 output_paths: list[Path] = []
                 if output:
                     output_paths = [Path(p) for p in (args.output or [])]
+                    # Check every --output now, before the skill runs. A bad path
+                    # would otherwise only fail at write time, after a fetch that
+                    # can take minutes, and the work would be lost.
+                    for path in output_paths:
+                        # A file somewhere above the output (e.g. -o rain.zip/out.zarr)
+                        # means its folder can never be created, so to_zarr would fail.
+                        blocker = next((p for p in path.parents if p.is_file()), None)
+                        if blocker is not None:
+                            raise UsageError(
+                                f"--output {path} is inside {blocker}, which is a file, "
+                                "not a folder; pass a path under a folder"
+                            )
+                        # Writing replaces whatever is at --output (write_output
+                        # deletes it first). A mistyped -o could name the user's own
+                        # folder or file, so only replace what is safe to lose: an
+                        # empty folder or an earlier skill output, which carries
+                        # weather_skills_history. See can_replace_output.
+                        if not provenance_mod.can_replace_output(path):
+                            raise UsageError(
+                                f"--output {path} already exists and was not written by a "
+                                "weather skill (it has no weather_skills_history), so it may "
+                                "be your own data; pass a new path"
+                            )
                     if not output_paths:
                         params["output"] = None
                     else:

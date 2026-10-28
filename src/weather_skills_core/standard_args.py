@@ -79,7 +79,13 @@ def convert_standard_args(args, arguments) -> dict:
     Only absolute values are parsed: a ``N/W/S/E`` bbox and ``YYYY-MM-DD``
     dates. Place names and relative dates are resolved before the call.
 
-    Raises UsageError if ``start_time`` is after ``end_time``.
+    A skill that declares a date flag with ``action="append"`` gets a list of
+    dates. Repeated ``--date`` gives one date per flag. Repeated
+    ``--start-time`` / ``--end-time`` pair up: the Nth start with the Nth end,
+    one window each.
+
+    Raises UsageError if a ``start_time`` is after its ``end_time``, or the
+    repeated starts and ends do not pair up.
     """
     params = {}
     for arg in arguments:
@@ -87,13 +93,29 @@ def convert_standard_args(args, arguments) -> dict:
         raw = getattr(args, dest)
         if dest == "bbox":
             params[dest] = parse_bbox(raw) if raw is not None else None
+        elif dest in ("date", "start_time", "end_time") and isinstance(raw, list):
+            params[dest] = [parse_date(value) for value in raw]
         elif dest in ("date", "start_time", "end_time"):
             params[dest] = parse_date(raw) if raw is not None else None
         else:
             params[dest] = raw
 
-    start = params.get("start_time")
-    end = params.get("end_time")
-    if start is not None and end is not None and start > end:
-        raise UsageError(f"--start-time {start.isoformat()} is after --end-time {end.isoformat()}.")
+    starts = params.get("start_time")
+    ends = params.get("end_time")
+    if isinstance(starts, list) or isinstance(ends, list):
+        # One side may be a plain flag: a single date counts as one.
+        starts = starts if isinstance(starts, list) else [] if starts is None else [starts]
+        ends = ends if isinstance(ends, list) else [] if ends is None else [ends]
+        if len(starts) != len(ends):
+            raise UsageError(
+                f"got {len(starts)} --start-time and {len(ends)} --end-time; "
+                "pass them in pairs, one pair per window."
+            )
+    else:
+        starts, ends = [starts], [ends]
+    for start, end in zip(starts, ends, strict=True):
+        if start is not None and end is not None and start > end:
+            raise UsageError(
+                f"--start-time {start.isoformat()} is after --end-time {end.isoformat()}."
+            )
     return params

@@ -254,6 +254,79 @@ def test_lookup_unknown_admin_unit(monkeypatch):
         lookup_region("kenya-not-a-county")
 
 
+def _admin_collection_of(names, level):
+    features = []
+    for i, name in enumerate(names):
+        x = 34.0 + i
+        features.append(
+            {
+                "type": "Feature",
+                "properties": {"shapeName": name, "shapeGroup": "KEN", "shapeType": f"ADM{level}"},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[x, 1.0], [x + 0.5, 1.0], [x + 0.5, 1.5], [x, 1.5], [x, 1.0]]],
+                },
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _fake_admin_counties(iso3, level, admin1=("West Pokot", "Trans Nzoia", "Nairobi"), admin2=()):
+    if level == 0:
+        raise region_mod._AdminMissing("offline test: no ADM0")
+    return _admin_collection_of(admin1 if level == 1 else admin2, level)
+
+
+def test_lookup_hyphen_for_space_in_county_name(monkeypatch):
+    """kenya-west-pokot is West Pokot (cleaned west_pokot), not admin-1 west + admin-2 pokot."""
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _fake_admin_counties)
+
+    for query, name in (("kenya-west-pokot", "West Pokot"), ("KEN-trans-nzoia", "Trans Nzoia")):
+        feature = lookup_region(query)
+        assert feature["properties"]["level"] == "admin_1"
+        assert feature["properties"]["name"] == name
+    assert lookup_region("kenya-west-pokot")["properties"]["region_name"] == "kenya-west_pokot"
+    assert lookup_region("kenya-west_pokot")["properties"]["name"] == "West Pokot"
+
+
+def test_lookup_hyphen_readings_that_both_match_take_the_key_as_written(monkeypatch):
+    """With admin-1 'West' + admin-2 'Pokot' and admin-1 'West Pokot', each key picks one."""
+    monkeypatch.setattr(
+        "weather_skills_core.region._load_admin_geojson",
+        lambda iso3, level: _fake_admin_counties(
+            iso3, level, admin1=("West", "West Pokot"), admin2=("Pokot",)
+        ),
+    )
+    feature = lookup_region("kenya-west-pokot")
+    assert (feature["properties"]["level"], feature["properties"]["name"]) == ("admin_2", "Pokot")
+    feature = lookup_region("kenya-west_pokot")
+    assert (feature["properties"]["level"], feature["properties"]["name"]) == (
+        "admin_1",
+        "West Pokot",
+    )
+
+
+def test_lookup_hyphen_readings_that_both_match_are_ambiguous(monkeypatch):
+    """admin-1 'West' + 'Pokot Central' and 'West Pokot' + 'Central': both keys work."""
+    monkeypatch.setattr(
+        "weather_skills_core.region._load_admin_geojson",
+        lambda iso3, level: _fake_admin_counties(
+            iso3, level, admin1=("West", "West Pokot"), admin2=("Pokot Central", "Central")
+        ),
+    )
+    with pytest.raises(DataError, match="Pass one of these keys") as err:
+        lookup_region("kenya-west-pokot-central")
+    for key in str(err.value).split(": ", 1)[1].split(". Pass")[0].split(", "):
+        lookup_region(key)
+
+
+def test_lookup_unknown_admin_suggests_close_names(monkeypatch):
+    monkeypatch.setattr("weather_skills_core.region._load_admin_geojson", _fake_admin_counties)
+
+    with pytest.raises(DataError, match="Did you mean kenya-west_pokot"):
+        lookup_region("kenya-west-pokott")
+
+
 def test_hyphenated_country_is_not_split_into_admin():
     """Guinea-Bissau is a country, not country 'Guinea' plus admin 'Bissau'."""
     feature = lookup_region("Guinea-Bissau")

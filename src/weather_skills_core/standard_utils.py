@@ -119,16 +119,24 @@ def fill_missing_data_var_attrs(src, dst):
     return out
 
 
+_CREDENTIAL_HINT = (
+    "If your organization provides these credentials, check that you are working in the "
+    "organization that holds them; otherwise set them in the environment."
+)
+
+
 def require_env(*names: str, message: str | None = None) -> tuple:
     """Return the values of the named environment variables, in order.
 
     Unset or empty vars are missing; raises ``UsageError`` with ``message`` or a
-    default listing the missing names. Never print or log the values.
+    default listing the missing names, followed by a hint to check the active
+    organization. Never print or log the values.
     """
     values = [os.environ.get(name) for name in names]
     missing = [name for name, value in zip(names, values, strict=True) if not value]
     if missing:
-        raise UsageError(message or f"missing required env var(s): {', '.join(missing)}")
+        text = message or f"missing required env var(s): {', '.join(missing)}."
+        raise UsageError(f"{text} {_CREDENTIAL_HINT}")
     return tuple(values)
 
 
@@ -338,12 +346,37 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             )
     lon_vals = np.asarray(ds[lon_dim].values)
     lon_ascending = lon_vals.size == 1 or lon_vals[1] > lon_vals[0]
-    ds = ds.sel({lat_dim: lat_slice(np.asarray(ds[lat_dim].values), north, south)})
+    # Half a cell width, so the grid's extent runs to its outer cell edges.
+    lon_half = abs(lon_vals[1] - lon_vals[0]) / 2 if lon_vals.size > 1 else 0.0
+    lat_vals = np.asarray(ds[lat_dim].values)
+    lat_half = abs(lat_vals[1] - lat_vals[0]) / 2 if lat_vals.size > 1 else 0.0
+    lat_mid = (north + south) / 2
+    lat_sub = ds.sel({lat_dim: lat_slice(lat_vals, north, south)})
+    # A box smaller than one cell may contain no cell centre. If its middle
+    # is on the grid, keep the cell it sits in. A reversed box (north < south)
+    # still errors.
+    if (
+        lat_sub.sizes[lat_dim] == 0
+        and north >= south
+        and lat_vals.min() - lat_half <= lat_mid <= lat_vals.max() + lat_half
+    ):
+        lat_sub = ds.isel({lat_dim: [int(np.abs(lat_vals - lat_mid).argmin())]})
+    ds = lat_sub
 
+    # Same small-box fallback for longitude: keep the cell the box's middle
+    # sits in. The middle and the distances wrap around ±180, so a box just
+    # inside 180 finds the cell centred at -180 on a global grid.
+    lon_mid = (west + east) / 2 if west <= east else (west + east + 360) / 2
+    lon_mid = lon_mid - 360 if lon_mid > 180 else lon_mid
+    distance = np.abs((lon_vals - lon_mid + 180) % 360 - 180)
+    mid_on_grid = distance.min() <= lon_half
     if west <= east:
         # Contiguous longitude span. Slice in the axis's own monotonic order.
         lon_sel = slice(west, east) if lon_ascending else slice(east, west)
-        ds = ds.sel({lon_dim: lon_sel})
+        lon_sub = ds.sel({lon_dim: lon_sel})
+        if lon_sub.sizes[lon_dim] == 0 and mid_on_grid:
+            lon_sub = ds.isel({lon_dim: [int(distance.argmin())]})
+        ds = lon_sub
     else:
         # Antimeridian crossing (west > east): the span runs west .. +180 and
         # -180 .. east. Select each wing with a label slice and concatenate
@@ -356,6 +389,8 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             wings = [ds.sel({lon_dim: slice(None, east)}), ds.sel({lon_dim: slice(west, None)})]
         else:
             wings = [ds.sel({lon_dim: slice(None, west)}), ds.sel({lon_dim: slice(east, None)})]
+        if sum(w.sizes[lon_dim] for w in wings) == 0 and mid_on_grid:
+            wings = [ds.isel({lon_dim: [int(distance.argmin())]})]
         ds = xr.concat(
             wings,
             dim=lon_dim,
@@ -600,6 +635,7 @@ def roll_and_agg(
     ``align`` is left/right/center label placement. ``stride`` is an int step,
     or a ``stride_dates`` string when ``dim`` is datetime64.
     Methods: ``mean``, ``min``, ``max`` only (rates-first).
+    The spacing along ``dim`` must be even.
     """
     import numpy as np
 
@@ -616,33 +652,39 @@ def roll_and_agg(
         raise UsageError(
             f"rolling aggregation requires datetime64 or timedelta64 on {dim!r}; got dtype {dtype}"
         )
-    # Roll on plain numbers: pint refuses the window sum behind a mean for an
-    # offset unit (degree_Celsius), though mean/min/max of one are well defined.
-    quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
-    plain = ds.pint.dequantify() if quantified else ds
-    rolled = plain.rolling({dim: window}, min_periods=min_periods, center=False)
-    fn = {"mean": rolled.mean, "max": rolled.max, "min": rolled.min}.get(method)
-    if fn is None:
+    if method not in ("mean", "max", "min"):
         raise UsageError(f"unsupported rolling method {method!r}; use mean|min|max")
-    out = fn(skipna=True, keep_attrs=True)
-    out = out.pint.quantify() if quantified else out
-    out = out.isel({dim: slice(window - 1, None)})
     step_by_align = {"center": (window - 1) // 2, "right": 0, "left": window - 1}
     if align not in step_by_align:
         raise UsageError(f"align must be left/right/center; got {align!r}")
     step_shift = step_by_align[align]
-    # Label each window with the original coordinate of its left/center/right
-    # sample, so uneven or sub-daily spacing is labelled exactly.
+    if isinstance(stride, int) and stride < 1:
+        raise UsageError(f"stride must be >= 1; got {stride}")
+    if stride is not None and not isinstance(stride, int) and np.issubdtype(dtype, np.timedelta64):
+        raise UsageError("string --stride requires a datetime64 time axis")
+
+    # A window is a count of samples, so it only spans a fixed length of time
+    # when the spacing is even.
+    diffs = np.diff(ds[dim].values)
+    if diffs.size and (diffs != diffs[0]).any():
+        raise UsageError(
+            f"{dim!r} spacing is not even; a rolling window counts samples, so "
+            "windows would span different lengths of time"
+        )
+
+    # Roll plain numbers: pint refuses to sum offset units such as degree_Celsius.
+    quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
+    plain = ds.pint.dequantify() if quantified else ds
+    rolled = plain.rolling({dim: window}, min_periods=min_periods, center=False)
+    out = getattr(rolled, method)(skipna=True, keep_attrs=True)
+    out = out.isel({dim: slice(window - 1, None)})
+    # Label each window by its left, centre or right sample.
     start = window - 1 - step_shift
     labels = ds[dim].values[start : start + out.sizes[dim]]
     out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
-    if stride is None:
-        return out
     if isinstance(stride, int):
-        if stride < 1:
-            raise UsageError(f"stride must be >= 1; got {stride}")
-        return out.isel({dim: slice(None, None, stride)})
-    if not np.issubdtype(out[dim].dtype, np.datetime64):
-        raise UsageError("string --stride requires a datetime64 time axis")
-    times = stride_dates(out[dim].values[0], out[dim].values[-1], stride=str(stride))
-    return out.sel({dim: times})
+        out = out.isel({dim: slice(None, None, stride)})
+    elif stride is not None and out.sizes[dim] > 0:
+        times = stride_dates(out[dim].values[0], out[dim].values[-1], stride=str(stride))
+        out = out.sel({dim: times})
+    return out.pint.quantify() if quantified else out

@@ -122,6 +122,66 @@ def test_bbox_subset_antimeridian_leaves_non_longitude_variables_alone():
     assert list(sub["tavg"].values) == [5, 6]
 
 
+def test_bbox_subset_box_smaller_than_a_cell_takes_nearest_cell():
+    lat = np.arange(10, -10.01, -0.25)
+    lon = np.arange(100, 115.01, 0.25)
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((lat.size, lon.size)))},
+        coords={"latitude": lat, "longitude": lon},
+    )
+    # 0.1 deg box: lat -2.75 is inside it, but no 0.25 deg lon centre is.
+    sub = utils.bbox_subset(ds, "-2.7/107.6/-2.8/107.7")
+    assert list(sub["latitude"].values) == [-2.75]
+    assert list(sub["longitude"].values) == [107.75]
+
+
+def test_bbox_subset_box_smaller_than_a_cell_in_an_edge_cell():
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((10, 10)))},
+        coords={"latitude": np.arange(10) + 0.5, "longitude": np.arange(10) + 0.5},
+    )
+    # Past the last cell centre (9.5) but inside that cell (9..10).
+    sub = utils.bbox_subset(ds, (9.9, 9.8, 9.8, 9.9))
+    assert list(sub["latitude"].values) == [9.5]
+    assert list(sub["longitude"].values) == [9.5]
+    # Past the last cell's edge selects nothing.
+    with pytest.raises(DataError, match="selects no grid cells"):
+        utils.bbox_subset(ds, (10.2, 10.1, 10.1, 10.2))
+
+
+def test_bbox_subset_box_smaller_than_a_cell_across_the_antimeridian():
+    lon = np.arange(-179.5, 180, 1.0)
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((3, lon.size)))},
+        coords={"latitude": [-1.0, 0.0, 1.0], "longitude": lon},
+    )
+    sub = utils.bbox_subset(ds, (0.1, 179.8, -0.1, -179.9))
+    assert list(sub["latitude"].values) == [0.0]
+    assert list(sub["longitude"].values) == [179.5]
+
+
+def test_bbox_subset_box_smaller_than_a_cell_next_to_180_wraps():
+    # On a 0..359 grid the cell centred at 180 (-180 once wrapped) covers
+    # 179.5..180.5, so a box at 179.6..179.9 sits in it.
+    lon = np.arange(0.0, 360.0, 1.0)
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((3, lon.size)))},
+        coords={"latitude": [4.0, 5.0, 6.0], "longitude": lon},
+    )
+    sub = utils.bbox_subset(ds, (5.3, 179.6, 5.1, 179.9))
+    assert list(sub["latitude"].values) == [5.0]
+    assert list(sub["longitude"].values) == [-180.0]
+
+
+def test_bbox_subset_reversed_north_south_is_data_error():
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((10, 10)))},
+        coords={"latitude": np.arange(10) + 0.5, "longitude": np.arange(10) + 0.5},
+    )
+    with pytest.raises(DataError, match="N/W/S/E order"):
+        utils.bbox_subset(ds, (2.0, 1.0, 8.0, 9.0))
+
+
 def test_bbox_subset_empty_result_is_data_error():
     ds = make_gridded()
     with pytest.raises(DataError, match="selects no grid cells"):
@@ -440,7 +500,10 @@ def test_require_env_default_message_names_only_the_missing(monkeypatch):
     monkeypatch.delenv("WSC_TEST_PASS", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", "WSC_TEST_PASS")
-    assert str(excinfo.value) == "missing required env var(s): WSC_TEST_PASS"
+    assert (
+        str(excinfo.value)
+        == f"missing required env var(s): WSC_TEST_PASS. {utils._CREDENTIAL_HINT}"
+    )
 
 
 def test_require_env_all_missing_listed_in_order(monkeypatch):
@@ -448,7 +511,9 @@ def test_require_env_all_missing_listed_in_order(monkeypatch):
     monkeypatch.delenv("WSC_TEST_PASS", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", "WSC_TEST_PASS")
-    assert str(excinfo.value) == "missing required env var(s): WSC_TEST_USER, WSC_TEST_PASS"
+    assert str(excinfo.value).startswith(
+        "missing required env var(s): WSC_TEST_USER, WSC_TEST_PASS."
+    )
 
 
 def test_require_env_empty_value_counts_as_missing(monkeypatch):
@@ -461,7 +526,10 @@ def test_require_env_message_override(monkeypatch):
     monkeypatch.delenv("WSC_TEST_USER", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", message="WSC_TEST_USER and WSC_TEST_PASS must be set.")
-    assert str(excinfo.value) == "WSC_TEST_USER and WSC_TEST_PASS must be set."
+    assert str(excinfo.value) == (
+        f"WSC_TEST_USER and WSC_TEST_PASS must be set. {utils._CREDENTIAL_HINT}"
+    )
+    assert "organization" in str(excinfo.value)
 
 
 def test_require_env_usage_error_exits_2(monkeypatch):
@@ -699,20 +767,41 @@ def test_roll_and_agg_left_align_on_half_hourly_time():
     assert out["time"].values[-1] == times[48]
 
 
-def test_roll_and_agg_labels_uneven_time_exactly():
-    # Daily axis with 2026-10-04 missing: labels must be original timestamps.
-    times = np.array(
-        ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06"],
-        dtype="datetime64[ns]",
+@pytest.mark.parametrize(
+    "dim, coord",
+    [
+        # Daily axis with 2026-10-04 missing.
+        (
+            "time",
+            np.array(
+                ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06"],
+                dtype="datetime64[ns]",
+            ),
+        ),
+        # IFS-ENS style leads: 3-hourly, then 6-hourly.
+        (
+            "step",
+            (np.array([0, 3, 6, 9, 15, 21]) * np.timedelta64(1, "h")).astype("timedelta64[ns]"),
+        ),
+    ],
+)
+def test_roll_and_agg_rejects_uneven_spacing(dim, coord):
+    ds = xr.Dataset({"precip": (dim, np.ones(coord.size))}, coords={dim: coord})
+    with pytest.raises(UsageError, match="spacing is not even"):
+        utils.roll_and_agg(ds, 2, dim, method="mean")
+
+
+@pytest.mark.parametrize("stride", [None, 2, "Monday"])
+def test_roll_and_agg_leaves_variables_without_the_dim_alone(stride):
+    times = np.arange("2026-01-01", "2026-01-11", dtype="datetime64[D]").astype("datetime64[ns]")
+    ds = xr.Dataset(
+        {"pr": (("time", "lat"), np.ones((10, 2))), "mask": ("lat", [1.0, 0.0]), "sc": 3.0},
+        coords={"time": times, "lat": [0.0, 1.0]},
     )
-    ds = xr.Dataset({"precip": ("time", np.arange(5.0))}, coords={"time": times})
-    ds["time"].attrs["standard_name"] = "time"
-    left = utils.roll_and_agg(ds, 3, "time", method="mean", align="left")
-    np.testing.assert_array_equal(left["time"].values, times[:3])
-    np.testing.assert_allclose(left["precip"].values, [1.0, 2.0, 3.0])
-    center = utils.roll_and_agg(ds, 3, "time", method="mean", align="center")
-    np.testing.assert_array_equal(center["time"].values, times[1:4])
-    assert center["time"].attrs["standard_name"] == "time"
+    out = utils.roll_and_agg(ds, 3, "time", method="mean", stride=stride)
+    assert out["pr"].dims == ("time", "lat")
+    assert out["mask"].dims == ("lat",)
+    assert out["sc"].dims == ()
 
 
 @pytest.mark.parametrize("align", ["left", "center", "right"])
