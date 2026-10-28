@@ -122,6 +122,19 @@ def test_bbox_subset_antimeridian_leaves_non_longitude_variables_alone():
     assert list(sub["tavg"].values) == [5, 6]
 
 
+def test_bbox_subset_box_smaller_than_a_cell_takes_nearest_cell():
+    lat = np.arange(10, -10.01, -0.25)
+    lon = np.arange(100, 115.01, 0.25)
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((lat.size, lon.size)))},
+        coords={"latitude": lat, "longitude": lon},
+    )
+    # 0.1 deg box: lat -2.75 is inside it, but no 0.25 deg lon centre is.
+    sub = utils.bbox_subset(ds, "-2.7/107.6/-2.8/107.7")
+    assert list(sub["latitude"].values) == [-2.75]
+    assert list(sub["longitude"].values) == [107.75]
+
+
 def test_bbox_subset_empty_result_is_data_error():
     ds = make_gridded()
     with pytest.raises(DataError, match="selects no grid cells"):
@@ -440,7 +453,10 @@ def test_require_env_default_message_names_only_the_missing(monkeypatch):
     monkeypatch.delenv("WSC_TEST_PASS", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", "WSC_TEST_PASS")
-    assert str(excinfo.value) == "missing required env var(s): WSC_TEST_PASS"
+    assert (
+        str(excinfo.value)
+        == f"missing required env var(s): WSC_TEST_PASS. {utils._CREDENTIAL_HINT}"
+    )
 
 
 def test_require_env_all_missing_listed_in_order(monkeypatch):
@@ -448,7 +464,9 @@ def test_require_env_all_missing_listed_in_order(monkeypatch):
     monkeypatch.delenv("WSC_TEST_PASS", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", "WSC_TEST_PASS")
-    assert str(excinfo.value) == "missing required env var(s): WSC_TEST_USER, WSC_TEST_PASS"
+    assert str(excinfo.value).startswith(
+        "missing required env var(s): WSC_TEST_USER, WSC_TEST_PASS."
+    )
 
 
 def test_require_env_empty_value_counts_as_missing(monkeypatch):
@@ -461,7 +479,10 @@ def test_require_env_message_override(monkeypatch):
     monkeypatch.delenv("WSC_TEST_USER", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", message="WSC_TEST_USER and WSC_TEST_PASS must be set.")
-    assert str(excinfo.value) == "WSC_TEST_USER and WSC_TEST_PASS must be set."
+    assert str(excinfo.value) == (
+        f"WSC_TEST_USER and WSC_TEST_PASS must be set. {utils._CREDENTIAL_HINT}"
+    )
+    assert "organization" in str(excinfo.value)
 
 
 def test_require_env_usage_error_exits_2(monkeypatch):
