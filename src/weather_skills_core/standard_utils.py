@@ -346,12 +346,20 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             )
     lon_vals = np.asarray(ds[lon_dim].values)
     lon_ascending = lon_vals.size == 1 or lon_vals[1] > lon_vals[0]
+    # Half a cell, so the outer cells count to their edges, not their centres.
+    lon_half = abs(lon_vals[1] - lon_vals[0]) / 2 if lon_vals.size > 1 else 0.0
     lat_vals = np.asarray(ds[lat_dim].values)
+    lat_half = abs(lat_vals[1] - lat_vals[0]) / 2 if lat_vals.size > 1 else 0.0
     lat_mid = (north + south) / 2
     lat_sub = ds.sel({lat_dim: lat_slice(lat_vals, north, south)})
-    # A box narrower than one cell can hold no cell centre; inside the grid,
-    # take the cell nearest the box's middle instead of selecting nothing.
-    if lat_sub.sizes[lat_dim] == 0 and lat_vals.min() <= lat_mid <= lat_vals.max():
+    # A box narrower than one cell can hold no cell centre; when its middle
+    # falls in a grid cell, take that cell instead of selecting nothing.
+    # A reversed box (north below south) is still an error.
+    if (
+        lat_sub.sizes[lat_dim] == 0
+        and north >= south
+        and lat_vals.min() - lat_half <= lat_mid <= lat_vals.max() + lat_half
+    ):
         lat_sub = ds.isel({lat_dim: [int(np.abs(lat_vals - lat_mid).argmin())]})
     ds = lat_sub
 
@@ -360,7 +368,10 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
         lon_sel = slice(west, east) if lon_ascending else slice(east, west)
         lon_mid = (west + east) / 2
         lon_sub = ds.sel({lon_dim: lon_sel})
-        if lon_sub.sizes[lon_dim] == 0 and lon_vals.min() <= lon_mid <= lon_vals.max():
+        if (
+            lon_sub.sizes[lon_dim] == 0
+            and lon_vals.min() - lon_half <= lon_mid <= lon_vals.max() + lon_half
+        ):
             lon_sub = ds.isel({lon_dim: [int(np.abs(lon_vals - lon_mid).argmin())]})
         ds = lon_sub
     else:
@@ -375,6 +386,16 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             wings = [ds.sel({lon_dim: slice(None, east)}), ds.sel({lon_dim: slice(west, None)})]
         else:
             wings = [ds.sel({lon_dim: slice(None, west)}), ds.sel({lon_dim: slice(east, None)})]
+        # A sub-cell box across the dateline: take the cell nearest its middle,
+        # measuring distance around the globe.
+        lon_mid = (west + east + 360) / 2
+        lon_mid = lon_mid - 360 if lon_mid > 180 else lon_mid
+        if (
+            sum(w.sizes[lon_dim] for w in wings) == 0
+            and lon_vals.min() - lon_half <= lon_mid <= lon_vals.max() + lon_half
+        ):
+            distance = np.abs((lon_vals - lon_mid + 180) % 360 - 180)
+            wings = [ds.isel({lon_dim: [int(distance.argmin())]})]
         ds = xr.concat(
             wings,
             dim=lon_dim,

@@ -135,6 +135,40 @@ def test_bbox_subset_box_smaller_than_a_cell_takes_nearest_cell():
     assert list(sub["longitude"].values) == [107.75]
 
 
+def test_bbox_subset_box_smaller_than_a_cell_in_an_edge_cell():
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((10, 10)))},
+        coords={"latitude": np.arange(10) + 0.5, "longitude": np.arange(10) + 0.5},
+    )
+    # Past the last cell centre (9.5) but inside that cell (9..10).
+    sub = utils.bbox_subset(ds, (9.9, 9.8, 9.8, 9.9))
+    assert list(sub["latitude"].values) == [9.5]
+    assert list(sub["longitude"].values) == [9.5]
+    # Past the last cell's edge selects nothing.
+    with pytest.raises(DataError, match="selects no grid cells"):
+        utils.bbox_subset(ds, (10.2, 10.1, 10.1, 10.2))
+
+
+def test_bbox_subset_box_smaller_than_a_cell_across_the_antimeridian():
+    lon = np.arange(-179.5, 180, 1.0)
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((3, lon.size)))},
+        coords={"latitude": [-1.0, 0.0, 1.0], "longitude": lon},
+    )
+    sub = utils.bbox_subset(ds, (0.1, 179.8, -0.1, -179.9))
+    assert list(sub["latitude"].values) == [0.0]
+    assert list(sub["longitude"].values) == [179.5]
+
+
+def test_bbox_subset_reversed_north_south_is_data_error():
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((10, 10)))},
+        coords={"latitude": np.arange(10) + 0.5, "longitude": np.arange(10) + 0.5},
+    )
+    with pytest.raises(DataError, match="N/W/S/E order"):
+        utils.bbox_subset(ds, (2.0, 1.0, 8.0, 9.0))
+
+
 def test_bbox_subset_empty_result_is_data_error():
     ds = make_gridded()
     with pytest.raises(DataError, match="selects no grid cells"):
