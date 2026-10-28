@@ -32,6 +32,10 @@ def hash_zarr(zarr_path: Path) -> str:
     """Stable sha256 of a zarr directory's relative paths + file bytes."""
     zarr_path = Path(zarr_path)
     h = hashlib.sha256()
+    if zarr_path.is_file():
+        # A zipped Zarr: the archive's bytes stand for the store.
+        h.update(zarr_path.read_bytes())
+        return h.hexdigest()
     for p in sorted(zarr_path.rglob("*")):
         if p.is_file():
             h.update(str(p.relative_to(zarr_path)).encode())
@@ -238,13 +242,43 @@ def _draw_official_mark(img):
     return marked.convert("RGB")
 
 
+def zipped_zarr(path: Path):
+    """``(store, group)`` for a zipped Zarr: the store at the zip root, or in one top folder.
+
+    Zipping a ``name.zarr`` folder usually puts the store under ``name.zarr/``
+    inside the archive, so a root without Zarr metadata looks one level down.
+    """
+    import zipfile
+
+    import zarr
+
+    from weather_skills_core.errors import UsageError
+
+    markers = ("zarr.json", ".zgroup", ".zmetadata")
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+    if any(n in markers for n in names):
+        return zarr.storage.ZipStore(path, mode="r"), None
+    tops = sorted(
+        {n.split("/")[0] for n in names if n.count("/") == 1 and n.split("/")[1] in markers}
+    )
+    if len(tops) == 1:
+        return zarr.storage.ZipStore(path, mode="r"), tops[0]
+    found = ", ".join(tops) if tops else "none"
+    raise UsageError(
+        f"{path} is a zip but holds no single Zarr store at its root or one folder down "
+        f"(Zarr folders found: {found}); zip one .zarr folder, or upload NetCDF instead"
+    )
+
+
 def load_history(zarr_path: Path) -> list:
     """Read a zarr store's history chain; empty on miss or malformation."""
     zarr_path = Path(zarr_path)
     try:
         import xarray as xr
 
-        with xr.open_zarr(zarr_path, consolidated=False) as ds:
+        store, group = zipped_zarr(zarr_path) if zarr_path.is_file() else (zarr_path, None)
+        with xr.open_zarr(store, group=group, consolidated=False) as ds:
             raw = ds.attrs.get(HISTORY_ATTR)
     except (OSError, KeyError, ValueError):
         return []
