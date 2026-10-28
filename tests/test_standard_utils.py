@@ -500,10 +500,7 @@ def test_require_env_default_message_names_only_the_missing(monkeypatch):
     monkeypatch.delenv("WSC_TEST_PASS", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", "WSC_TEST_PASS")
-    assert (
-        str(excinfo.value)
-        == f"missing required env var(s): WSC_TEST_PASS. {utils._CREDENTIAL_HINT}"
-    )
+    assert str(excinfo.value) == "missing required env var(s): WSC_TEST_PASS"
 
 
 def test_require_env_all_missing_listed_in_order(monkeypatch):
@@ -511,9 +508,7 @@ def test_require_env_all_missing_listed_in_order(monkeypatch):
     monkeypatch.delenv("WSC_TEST_PASS", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", "WSC_TEST_PASS")
-    assert str(excinfo.value).startswith(
-        "missing required env var(s): WSC_TEST_USER, WSC_TEST_PASS."
-    )
+    assert str(excinfo.value) == "missing required env var(s): WSC_TEST_USER, WSC_TEST_PASS"
 
 
 def test_require_env_empty_value_counts_as_missing(monkeypatch):
@@ -526,10 +521,7 @@ def test_require_env_message_override(monkeypatch):
     monkeypatch.delenv("WSC_TEST_USER", raising=False)
     with pytest.raises(UsageError) as excinfo:
         utils.require_env("WSC_TEST_USER", message="WSC_TEST_USER and WSC_TEST_PASS must be set.")
-    assert str(excinfo.value) == (
-        f"WSC_TEST_USER and WSC_TEST_PASS must be set. {utils._CREDENTIAL_HINT}"
-    )
-    assert "organization" in str(excinfo.value)
+    assert str(excinfo.value) == "WSC_TEST_USER and WSC_TEST_PASS must be set."
 
 
 def test_require_env_usage_error_exits_2(monkeypatch):
