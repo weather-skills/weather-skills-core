@@ -169,21 +169,22 @@ def write_output(value, out_path, history, first_ds):
         value.attrs = {**first_ds.attrs, **value.attrs}
     value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
-    if out_path.exists() and not out_path.is_dir():
-        raise UsageError(
-            f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
-        )
-    # Replace an earlier Zarr, never a folder of the user's that only shares the name.
-    zarr_markers = ("zarr.json", ".zgroup", ".zarray", ".zmetadata")
-    if (
-        out_path.exists()
-        and any(out_path.iterdir())
-        and not any((out_path / m).exists() for m in zarr_markers)
-    ):
-        raise UsageError(
-            f"--output {out_path} is an existing folder, not a Zarr store; pass a new path"
-        )
+    # An existing --output is deleted and rewritten, so first make sure it is safe
+    # to delete: an empty folder or an earlier Zarr store. A file, or a folder
+    # holding anything else, may be the user's own data and is refused.
     if out_path.exists():
+        if not out_path.is_dir():
+            raise UsageError(
+                f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
+            )
+        # A Zarr store has one of these at its top: v3 metadata, v2 group,
+        # v2 array, or v2 consolidated metadata.
+        zarr_metadata = ("zarr.json", ".zgroup", ".zarray", ".zmetadata")
+        is_zarr = any((out_path / name).exists() for name in zarr_metadata)
+        if not is_zarr and any(out_path.iterdir()):
+            raise UsageError(
+                f"--output {out_path} is an existing folder, not a Zarr store; pass a new path"
+            )
         shutil.rmtree(out_path)
     try:
         value.to_zarr(out_path, mode="w", consolidated=True)
