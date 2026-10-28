@@ -85,8 +85,11 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
     """
     entry_args = {k: v for k, v in vars(args).items() if k not in strip_dests}
     for dest in ("date", "start_time", "end_time"):
-        if dest in params and params[dest] is not None:
-            entry_args[dest] = params[dest].isoformat()
+        value = params.get(dest)
+        if isinstance(value, list):
+            entry_args[dest] = [d.isoformat() for d in value]
+        elif value is not None:
+            entry_args[dest] = value.isoformat()
     entry_args = json.loads(json.dumps(entry_args, default=_history_json_default))
 
     if not input_paths:
