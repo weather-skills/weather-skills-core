@@ -289,16 +289,35 @@ def test_lookup_hyphen_for_space_in_county_name(monkeypatch):
     assert lookup_region("kenya-west_pokot")["properties"]["name"] == "West Pokot"
 
 
-def test_lookup_hyphen_readings_that_both_match_are_ambiguous(monkeypatch):
-    """When admin-1 'West' + admin-2 'Pokot' and admin-1 'West Pokot' both exist, name both."""
+def test_lookup_hyphen_readings_that_both_match_take_the_key_as_written(monkeypatch):
+    """With admin-1 'West' + admin-2 'Pokot' and admin-1 'West Pokot', each key picks one."""
     monkeypatch.setattr(
         "weather_skills_core.region._load_admin_geojson",
         lambda iso3, level: _fake_admin_counties(
             iso3, level, admin1=("West", "West Pokot"), admin2=("Pokot",)
         ),
     )
-    with pytest.raises(DataError, match="kenya-west-pokot, kenya-west_pokot"):
-        lookup_region("kenya-west-pokot")
+    feature = lookup_region("kenya-west-pokot")
+    assert (feature["properties"]["level"], feature["properties"]["name"]) == ("admin_2", "Pokot")
+    feature = lookup_region("kenya-west_pokot")
+    assert (feature["properties"]["level"], feature["properties"]["name"]) == (
+        "admin_1",
+        "West Pokot",
+    )
+
+
+def test_lookup_hyphen_readings_that_both_match_are_ambiguous(monkeypatch):
+    """admin-1 'West' + 'Pokot Central' and 'West Pokot' + 'Central': both keys work."""
+    monkeypatch.setattr(
+        "weather_skills_core.region._load_admin_geojson",
+        lambda iso3, level: _fake_admin_counties(
+            iso3, level, admin1=("West", "West Pokot"), admin2=("Pokot Central", "Central")
+        ),
+    )
+    with pytest.raises(DataError, match="Pass one of these keys") as err:
+        lookup_region("kenya-west-pokot-central")
+    for key in str(err.value).split(": ", 1)[1].split(". Pass")[0].split(", "):
+        lookup_region(key)
 
 
 def test_lookup_unknown_admin_suggests_close_names(monkeypatch):

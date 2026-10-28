@@ -623,6 +623,11 @@ def lookup_region(query: str) -> dict:
     split = _split_subnational(cleaned)
     if split is not None:
         country, remainder = split
+        # The key exactly as written wins, so every key an ambiguity error
+        # lists below selects its own region.
+        hit = _find_admin(country, remainder)
+        if hit is not None:
+            return hit
         # A hyphen may also stand for the space in a name (kenya-west-pokot for
         # West Pokot, cleaned to west_pokot), so try each reading of the hyphens:
         # as written, all as spaces, and as spaces on either side of one level break.
