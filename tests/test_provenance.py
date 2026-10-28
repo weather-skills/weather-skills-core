@@ -322,6 +322,33 @@ def test_visualization_gif_keeps_frames_and_timing(tmp_path):
             assert len(corner) > 1
 
 
+def test_visualization_gif_frames_share_one_palette(tmp_path):
+    import numpy as np
+
+    path = tmp_path / "x.gif"
+    # The same 200-colour ramp (a colorbar) beside 50 colours of each frame's own:
+    # each frame fits in 256 colours, but with the seal added it no longer does.
+    ramp = np.repeat(np.arange(200, dtype=np.uint8), 2)[:, None]
+    frames = []
+    for f in range(3):
+        rgb = np.full((400, 300, 3), 255, np.uint8)
+        rgb[:, :100] = np.stack([ramp, 255 - ramp, ramp // 2], -1)
+        own = np.repeat(np.arange(50, dtype=np.uint8), 8)[:, None]
+        rgb[:, 100:200] = np.stack([own + 60 * f, own, 255 - own], -1)
+        frames.append(Image.fromarray(rgb))
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=300, loop=0)
+    provenance.stamp_figure(path, [entry()])
+    with Image.open(path) as img:
+        ramps, colours = [], set()
+        for i in range(img.n_frames):
+            img.seek(i)
+            rgb = img.convert("RGB")
+            ramps.append(rgb.crop((0, 0, 100, 400)).tobytes())
+            colours |= {c for _, c in rgb.getcolors(1 << 24)}
+    assert len(colours) <= 256
+    assert len(set(ramps)) == 1
+
+
 def test_visualization_png_official_mark_when_intact(tmp_path):
     path = tmp_path / "marked.png"
     Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)

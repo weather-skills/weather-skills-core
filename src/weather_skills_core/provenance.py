@@ -529,6 +529,15 @@ def stamp_figure(path: Path, history: list) -> None:
                 rgb = frame.convert("RGB")
                 frames.append(_draw_official_mark(rgb) if mark else rgb)
             loop = img.info.get("loop", 0)
+        # A GIF frame holds 256 colours. Left to Pillow, each frame gets its own palette
+        # and the same colours (a colorbar) band differently from frame to frame. Pick
+        # one palette from all frames stacked together and map every frame onto it.
+        w, h = frames[0].size
+        stack = Image.new("RGB", (w, h * len(frames)))
+        for i, frame in enumerate(frames):
+            stack.paste(frame, (0, h * i))
+        palette = stack.quantize(256, dither=Image.Dither.NONE)
+        frames = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
         frames[0].save(
             path,
             save_all=True,
