@@ -346,15 +346,23 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             )
     lon_vals = np.asarray(ds[lon_dim].values)
     lon_ascending = lon_vals.size == 1 or lon_vals[1] > lon_vals[0]
-    # Half a cell, so the outer cells count to their edges, not their centres.
+    # Coordinates are cell centres, but each cell covers half a spacing either
+    # side. The halves below widen the grid's extent from its outer centres to
+    # its outer edges, so a point inside an edge cell (but beyond its centre)
+    # still counts as on the grid. A single-cell axis has no spacing; treat it
+    # as a point.
     lon_half = abs(lon_vals[1] - lon_vals[0]) / 2 if lon_vals.size > 1 else 0.0
     lat_vals = np.asarray(ds[lat_dim].values)
     lat_half = abs(lat_vals[1] - lat_vals[0]) / 2 if lat_vals.size > 1 else 0.0
     lat_mid = (north + south) / 2
+    # Normal case: keep every row whose centre lies between south and north.
     lat_sub = ds.sel({lat_dim: lat_slice(lat_vals, north, south)})
-    # A box narrower than one cell can hold no cell centre; when its middle
-    # falls in a grid cell, take that cell instead of selecting nothing.
-    # A reversed box (north below south) is still an error.
+    # Fallback for a box narrower than one cell (e.g. a 0.1° box on a 1° grid):
+    # it can fall between two centres and select no rows at all. If so, and
+    # the box's middle lies within the grid's edges, keep the one row whose
+    # centre is nearest that middle, i.e. the cell the box sits in.
+    # Not applied when north < south: a reversed box is a user mistake, so it
+    # still selects nothing and raises the usual empty-bbox error below.
     if (
         lat_sub.sizes[lat_dim] == 0
         and north >= south
@@ -368,6 +376,8 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
         lon_sel = slice(west, east) if lon_ascending else slice(east, west)
         lon_mid = (west + east) / 2
         lon_sub = ds.sel({lon_dim: lon_sel})
+        # Same sub-cell fallback as for latitude: no column centre inside the
+        # box, but its middle is on the grid, so keep the nearest column.
         if (
             lon_sub.sizes[lon_dim] == 0
             and lon_vals.min() - lon_half <= lon_mid <= lon_vals.max() + lon_half
@@ -386,8 +396,10 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             wings = [ds.sel({lon_dim: slice(None, east)}), ds.sel({lon_dim: slice(west, None)})]
         else:
             wings = [ds.sel({lon_dim: slice(None, west)}), ds.sel({lon_dim: slice(east, None)})]
-        # A sub-cell box across the dateline: take the cell nearest its middle,
-        # measuring distance around the globe.
+        # Same sub-cell fallback for a box across the dateline. Its middle is
+        # found by unwrapping east by +360 (so the span is west .. east+360),
+        # averaging, then wrapping back into [-180, 180]. Distances wrap
+        # around the globe so a column at 179.9 is near a middle at -179.9.
         lon_mid = (west + east + 360) / 2
         lon_mid = lon_mid - 360 if lon_mid > 180 else lon_mid
         if (
