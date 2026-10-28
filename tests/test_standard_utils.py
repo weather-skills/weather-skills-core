@@ -160,6 +160,19 @@ def test_bbox_subset_box_smaller_than_a_cell_across_the_antimeridian():
     assert list(sub["longitude"].values) == [179.5]
 
 
+def test_bbox_subset_box_smaller_than_a_cell_next_to_180_wraps():
+    # On a 0..359 grid the cell centred at 180 (-180 once wrapped) covers
+    # 179.5..180.5, so a box at 179.6..179.9 sits in it.
+    lon = np.arange(0.0, 360.0, 1.0)
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((3, lon.size)))},
+        coords={"latitude": [4.0, 5.0, 6.0], "longitude": lon},
+    )
+    sub = utils.bbox_subset(ds, (5.3, 179.6, 5.1, 179.9))
+    assert list(sub["latitude"].values) == [5.0]
+    assert list(sub["longitude"].values) == [-180.0]
+
+
 def test_bbox_subset_reversed_north_south_is_data_error():
     ds = xr.Dataset(
         {"precip": (("latitude", "longitude"), np.zeros((10, 10)))},

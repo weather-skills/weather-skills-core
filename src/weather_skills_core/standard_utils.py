@@ -363,17 +363,19 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
         lat_sub = ds.isel({lat_dim: [int(np.abs(lat_vals - lat_mid).argmin())]})
     ds = lat_sub
 
+    # Same small-box fallback for longitude: keep the cell the box's middle
+    # sits in. The middle and the distances wrap around ±180, so a box just
+    # inside 180 finds the cell centred at -180 on a global grid.
+    lon_mid = (west + east) / 2 if west <= east else (west + east + 360) / 2
+    lon_mid = lon_mid - 360 if lon_mid > 180 else lon_mid
+    distance = np.abs((lon_vals - lon_mid + 180) % 360 - 180)
+    mid_on_grid = distance.min() <= lon_half
     if west <= east:
         # Contiguous longitude span. Slice in the axis's own monotonic order.
         lon_sel = slice(west, east) if lon_ascending else slice(east, west)
-        lon_mid = (west + east) / 2
         lon_sub = ds.sel({lon_dim: lon_sel})
-        # Same small-box fallback as latitude.
-        if (
-            lon_sub.sizes[lon_dim] == 0
-            and lon_vals.min() - lon_half <= lon_mid <= lon_vals.max() + lon_half
-        ):
-            lon_sub = ds.isel({lon_dim: [int(np.abs(lon_vals - lon_mid).argmin())]})
+        if lon_sub.sizes[lon_dim] == 0 and mid_on_grid:
+            lon_sub = ds.isel({lon_dim: [int(distance.argmin())]})
         ds = lon_sub
     else:
         # Antimeridian crossing (west > east): the span runs west .. +180 and
@@ -387,15 +389,7 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             wings = [ds.sel({lon_dim: slice(None, east)}), ds.sel({lon_dim: slice(west, None)})]
         else:
             wings = [ds.sel({lon_dim: slice(None, west)}), ds.sel({lon_dim: slice(east, None)})]
-        # Same small-box fallback across the dateline; the middle and the
-        # distances wrap around ±180.
-        lon_mid = (west + east + 360) / 2
-        lon_mid = lon_mid - 360 if lon_mid > 180 else lon_mid
-        if (
-            sum(w.sizes[lon_dim] for w in wings) == 0
-            and lon_vals.min() - lon_half <= lon_mid <= lon_vals.max() + lon_half
-        ):
-            distance = np.abs((lon_vals - lon_mid + 180) % 360 - 180)
+        if sum(w.sizes[lon_dim] for w in wings) == 0 and mid_on_grid:
             wings = [ds.isel({lon_dim: [int(distance.argmin())]})]
         ds = xr.concat(
             wings,
