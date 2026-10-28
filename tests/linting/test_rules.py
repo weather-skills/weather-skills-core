@@ -318,6 +318,13 @@ def test_frontmatter_rule_quoted_colon_in_description_does_not_fire(tmp_path):
     assert [f for f in run_lint(skill).findings if f.rule == "WSK302"] == []
 
 
+def test_frontmatter_rule_trailing_spaces_on_fences_do_not_fire(tmp_path):
+    skill = _frontmatter_skill(
+        tmp_path, "--- \nname: multi-skill\ndescription: Lint fixture.\n---  \n"
+    )
+    assert [f for f in run_lint(skill).findings if f.rule == "WSK302"] == []
+
+
 @pytest.mark.parametrize(
     ("frontmatter", "message"),
     [
@@ -327,6 +334,7 @@ def test_frontmatter_rule_quoted_colon_in_description_does_not_fire(tmp_path):
         ("---\nname: multi-skill\n---\n", "`description` must be a non-empty string"),
         ("---\nname: multi-skill\ndescription: ''\n---\n", "`description` must be"),
         ("---\ndescription: Lint fixture.\n---\n", "`name` must be a non-empty string"),
+        ("﻿---\nname: multi-skill\ndescription: Lint fixture.\n---\n", "byte-order mark"),
     ],
 )
 def test_frontmatter_rule_malformed_frontmatter_fires_wsk302(tmp_path, frontmatter, message):

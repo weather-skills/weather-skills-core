@@ -315,11 +315,15 @@ def _rule_frontmatter(decl: SkillDeclaration) -> list[Finding]:
     """
     skill_md = decl.skill_dir / "SKILL.md"
     try:
-        lines = skill_md.read_text(encoding="utf-8").splitlines()
+        text = skill_md.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
+    # Trailing spaces on a `---` line still close the block.
+    lines = [line.rstrip() if line.rstrip() == "---" else line for line in text.splitlines()]
     problem = None
-    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+    if text.startswith("﻿"):
+        problem = "SKILL.md starts with a byte-order mark; save it as UTF-8 without a BOM"
+    elif not lines or lines[0] != "---" or "---" not in lines[1:]:
         problem = "SKILL.md does not open with a YAML frontmatter block between `---` lines"
     else:
         try:
