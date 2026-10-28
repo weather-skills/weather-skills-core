@@ -103,6 +103,7 @@ def convert_standard_args(args, arguments) -> dict:
     starts = params.get("start_time")
     ends = params.get("end_time")
     if isinstance(starts, list) or isinstance(ends, list):
+        # One side may be a plain flag: a single date counts as one.
         starts = starts if isinstance(starts, list) else [] if starts is None else [starts]
         ends = ends if isinstance(ends, list) else [] if ends is None else [ends]
         if len(starts) != len(ends):

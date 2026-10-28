@@ -802,6 +802,64 @@ def test_roll_and_agg_stride_restarts_each_january(stride):
     assert all(t[:4] in ("2024", "2025") and t[5:7] == "01" for t in labels)
 
 
+def _stacked(windows):
+    times = np.concatenate(
+        [
+            np.arange(s, np.datetime64(e) + np.timedelta64(1, "D"), dtype="datetime64[D]")
+            for s, e in windows
+        ]
+    ).astype("datetime64[ns]")
+    return xr.Dataset(
+        {"precip": ("time", np.arange(times.size, dtype=float))}, coords={"time": times}
+    )
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        # Out of order: 2025's window comes first, so time steps back a year.
+        [("2025-01-01", "2025-01-10"), ("2024-01-01", "2024-01-10")],
+        # Overlapping: the second window starts inside the first.
+        [("2024-01-01", "2024-01-10"), ("2024-01-05", "2024-01-15")],
+    ],
+)
+def test_roll_and_agg_never_bridges_a_step_back(windows):
+    out = utils.roll_and_agg(_stacked(windows), 3, "time", method="mean")
+    # Each window rolls on its own: (10 - 2) + (len2 - 2) windows.
+    lengths = [int((np.datetime64(e) - np.datetime64(s)).astype(int)) + 1 for s, e in windows]
+    assert out.sizes["time"] == sum(n - 2 for n in lengths)
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_roll_and_agg_stacked_windows_match_rolling_each_alone(seed):
+    rng = np.random.default_rng(seed)
+    windows, cur = [], np.datetime64("2000-01-01")
+    for _ in range(rng.integers(1, 6)):
+        cur = cur + np.timedelta64(int(rng.integers(2, 400)), "D")
+        end = cur + np.timedelta64(int(rng.integers(0, 60)), "D")
+        windows.append((str(cur), str(end)))
+        cur = end
+    window = int(rng.integers(1, 10))
+    method = str(rng.choice(["mean", "min", "max"]))
+    align = str(rng.choice(["left", "center", "right"]))
+    stride = [None, 1, 2, 7][int(rng.integers(4))]
+    ds = _stacked(windows)
+    out = utils.roll_and_agg(ds, window, "time", method=method, align=align, stride=stride)
+
+    shift = {"center": (window - 1) // 2, "right": 0, "left": window - 1}[align]
+    labels, values = [], []
+    for s, e in windows:
+        part = ds.sel(time=slice(s, e))
+        v, t = part["precip"].values, part["time"].values
+        ends = range(window - 1, v.size)
+        run_values = [getattr(np, method)(v[i - window + 1 : i + 1]) for i in ends]
+        run_labels = [t[i - shift] for i in ends]
+        labels += run_labels[::stride]
+        values += run_values[::stride]
+    np.testing.assert_array_equal(out["time"].values, np.array(labels, dtype="datetime64[ns]"))
+    np.testing.assert_allclose(out["precip"].values, values)
+
+
 def test_roll_and_agg_keeps_step_axis_whole_when_spacing_changes():
     # IFS-ENS style leads: 3-hourly, then 6-hourly. No split on a lead axis.
     hours = np.concatenate([np.arange(0, 144, 3), np.arange(144, 361, 6)])

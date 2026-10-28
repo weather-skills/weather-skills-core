@@ -670,7 +670,10 @@ def roll_and_agg(
         raise UsageError("string --stride requires a datetime64 time axis")
 
     # Split a time axis at its gaps (any spacing over 1.5x the median): stacked
-    # windows such as each January, or a missing day. Each run is rolled and
+    # windows such as each January, or a missing day. A step back or a repeat
+    # (windows out of order or overlapping) also starts a new run. The median
+    # is the axis's own spacing only while most steps are not gaps, so a
+    # handful of scattered dates is not split. Each run is rolled and
     # strided on its own, so a window never bridges a gap and a stride restarts
     # at each run. Lead (step) axes change spacing on purpose (3 h then 6 h), so
     # they are rolled whole.

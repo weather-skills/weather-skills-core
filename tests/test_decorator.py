@@ -310,6 +310,114 @@ def test_run_loop_repeated_time_windows_unpaired_or_reversed_exit(tmp_path, extr
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("seed", range(60))
+def test_run_loop_repeated_time_windows_random(tmp_path, seed):
+    # Random counts, overlaps and flag interleavings: the Nth start pairs the
+    # Nth end, or the skill exits 2.
+    import random
+    from datetime import date, timedelta
+
+    rng = random.Random(seed)
+    starts = [
+        date(1990, 1, 1) + timedelta(days=rng.randint(0, 20000)) for _ in range(rng.randint(1, 5))
+    ]
+    if rng.random() < 0.7:
+        ends = [s + timedelta(days=rng.randint(-3, 40)) for s in starts]
+    else:
+        ends = [
+            date(1990, 1, 1) + timedelta(days=rng.randint(0, 20000))
+            for _ in range(rng.randint(0, 5))
+        ]
+    flags = ["--start-time"] * len(starts) + ["--end-time"] * len(ends)
+    rng.shuffle(flags)
+    pending = {"--start-time": iter(starts), "--end-time": iter(ends)}
+    argv = [x for flag in flags for x in (flag, next(pending[flag]).isoformat())]
+    seen = {}
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--start-time", action="append")
+    @weather_skill.argument("--end-time", action="append")
+    def skill(output, start_time, end_time, **kwargs):
+        seen["windows"] = list(zip(start_time, end_time, strict=True))
+        return make_gridded()
+
+    paired = len(starts) == len(ends) and all(s <= e for s, e in zip(starts, ends, strict=False))
+    if not paired:
+        with pytest.raises(SystemExit) as exc:
+            skill(["-o", str(tmp_path / "out.zarr"), *argv])
+        assert exc.value.code == 2
+        return
+    skill(["-o", str(tmp_path / "out.zarr"), *argv])
+    assert seen["windows"] == list(zip(starts, ends, strict=True))
+
+
+def test_run_loop_repeated_time_windows_replay_from_history(tmp_path):
+    # provenance's script writes flags sorted by name, each list item repeated.
+    seen = []
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--start-time", action="append")
+    @weather_skill.argument("--end-time", action="append")
+    def skill(output, start_time, end_time, **kwargs):
+        seen.append(list(zip(start_time, end_time, strict=True)))
+        return make_gridded()
+
+    skill(
+        [
+            "-o",
+            str(tmp_path / "a.zarr"),
+            "--start-time",
+            "2023-12-01",
+            "--end-time",
+            "2024-02-29",
+            "--start-time",
+            "2024-12-01",
+            "--end-time",
+            "2025-02-28",
+        ]
+    )
+    argv = []
+    for dest, values in sorted(load_history(tmp_path / "a.zarr")[-1]["args"].items()):
+        for value in values:
+            argv += ["--" + dest.replace("_", "-"), value]
+    skill(["-o", str(tmp_path / "b.zarr"), *argv])
+    assert seen[0] == seen[1]
+
+
+@pytest.mark.parametrize("append_dest", ["start_time", "end_time"])
+def test_run_loop_one_repeated_and_one_single_time_flag(tmp_path, append_dest):
+    from datetime import date
+
+    start_kwargs = {"action": "append"} if append_dest == "start_time" else {}
+    end_kwargs = {"action": "append"} if append_dest == "end_time" else {}
+    seen = {}
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--start-time", **start_kwargs)
+    @weather_skill.argument("--end-time", **end_kwargs)
+    def skill(output, start_time, end_time, **kwargs):
+        seen["args"] = (start_time, end_time)
+        return make_gridded()
+
+    out = str(tmp_path / "out.zarr")
+    skill(["-o", out, "--start-time", "2024-01-01", "--end-time", "2024-01-31"])
+    start, end = seen["args"]
+    assert (start, end) == (
+        [date(2024, 1, 1)] if append_dest == "start_time" else date(2024, 1, 1),
+        [date(2024, 1, 31)] if append_dest == "end_time" else date(2024, 1, 31),
+    )
+    # Two of the repeated flag against one of the other is unpaired.
+    other = "--start-time" if append_dest == "end_time" else "--end-time"
+    repeated = "--end-time" if append_dest == "end_time" else "--start-time"
+    with pytest.raises(SystemExit) as exc:
+        skill(["-o", out, other, "2024-01-01", repeated, "2024-01-31", repeated, "2024-02-28"])
+    assert exc.value.code == 2
+    # A reversed single window still exits 2.
+    with pytest.raises(SystemExit) as exc:
+        skill(["-o", out, "--start-time", "2024-02-01", "--end-time", "2024-01-01"])
+    assert exc.value.code == 2
+
+
 def test_run_loop_output_inside_a_file_exits_before_running(tmp_path, capsys):
     (tmp_path / "check.csv").write_text("a,b\n")
     ran = []
