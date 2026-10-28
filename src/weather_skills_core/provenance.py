@@ -519,8 +519,7 @@ def stamp_figure(path: Path, history: list) -> None:
         return
 
     if suffix == ".gif":
-        import numpy as np
-        from PIL import Image, ImageSequence
+        from PIL import Image, ImageDraw, ImageSequence
 
         # The history goes in the GIF comment block; each frame keeps its duration.
         with Image.open(path) as img:
@@ -528,23 +527,30 @@ def stamp_figure(path: Path, history: list) -> None:
             for frame in ImageSequence.Iterator(img):
                 durations.append(frame.info.get("duration", 0))
                 rgb = frame.convert("RGB")
-                marked = _draw_official_mark(rgb) if mark else rgb
-                # Saving RGB would let Pillow pick a new 256-colour palette and recolour
-                # the whole frame. Keep the frame's own colours, so every pixel off the
-                # mark stays as it was; the mark gets the free palette slots, and
-                # otherwise the nearest colour the frame has.
-                colours = [c for _, c in rgb.getcolors(256)]
-                ink = sorted(marked.getcolors(1 << 16), reverse=True)
-                colours += [c for _, c in ink if c not in colours][: 256 - len(colours)]
-                # Pillow's quantize(palette=...) matches colours only roughly and merges
-                # close shades, so look each pixel's colour up exactly here.
-                palette = np.array(colours, dtype=np.int32)
-                pixels = np.asarray(marked, dtype=np.int32)
-                seen, where = np.unique(pixels.reshape(-1, 3), axis=0, return_inverse=True)
-                nearest = ((seen[:, None] - palette[None]) ** 2).sum(-1).argmin(1)
-                out = Image.fromarray(nearest[where].reshape(pixels.shape[:2]).astype(np.uint8))
-                out.putpalette(palette.astype(np.uint8).ravel().tolist())
-                frames.append(out)
+                shape = _stamp_shape(*rgb.size)
+                if mark and shape is not None:
+                    # A GIF frame holds 256 colours. A smooth mark adds dozens, and Pillow
+                    # would then pick a new palette and recolour the whole frame (a colorbar
+                    # bands differently from frame to frame). Draw it hard-edged in one
+                    # colour, the frame's nearest when its palette is full, so the frame
+                    # still fits and every pixel off the mark keeps its colour.
+                    cx, cy, r, stroke, star = shape
+                    ink = _MARK_INK[:3]
+                    colours = [c for _, c in rgb.getcolors(256) or []]
+                    if len(colours) == 256 and ink not in colours:
+                        ink = min(
+                            colours,
+                            key=lambda c: sum((a - b) ** 2 for a, b in zip(c, ink, strict=True)),
+                        )
+                    draw = ImageDraw.Draw(rgb)
+                    outer = r + stroke / 2
+                    draw.ellipse(
+                        (cx - outer, cy - outer, cx + outer, cy + outer),
+                        outline=ink,
+                        width=round(stroke),
+                    )
+                    draw.polygon(star, fill=ink)
+                frames.append(rgb)
             loop = img.info.get("loop", 0)
         frames[0].save(
             path,
