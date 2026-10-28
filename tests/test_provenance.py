@@ -322,6 +322,40 @@ def test_visualization_gif_keeps_frames_and_timing(tmp_path):
             assert len(corner) > 1
 
 
+# 251 colours leaves the mark a free palette slot; 256 makes it reuse the nearest colour.
+@pytest.mark.parametrize("n_own", [50, 55])
+def test_visualization_gif_stamp_changes_only_the_mark(tmp_path, n_own):
+    import numpy as np
+    from PIL import ImageChops
+
+    path = tmp_path / "x.gif"
+    # A 200-colour ramp (a colorbar) beside colours of each frame's own: nearly
+    # the whole palette, so re-picking it would recolour the ramp.
+    ramp = np.repeat(np.arange(200, dtype=np.uint8), 2)[:, None]
+    frames = []
+    for f in range(3):
+        rgb = np.full((400, 300, 3), 255, np.uint8)
+        rgb[:, :100] = np.stack([ramp, 255 - ramp, ramp // 2], -1)
+        own = (np.arange(400) * n_own // 400).astype(np.uint8)[:, None]
+        rgb[:, 100:200] = np.stack([own + 60 * f, own, 255 - own], -1)
+        frames.append(Image.fromarray(rgb))
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=300, loop=0)
+    with Image.open(path) as img:
+        frames = []
+        for i in range(img.n_frames):
+            img.seek(i)
+            frames.append(img.convert("RGB"))
+    provenance.stamp_figure(path, [entry()])
+    cx, cy, r, stroke, _ = provenance._stamp_shape(300, 400)
+    with Image.open(path) as img:
+        for i, before in enumerate(frames):
+            img.seek(i)
+            x0, y0, x1, y1 = ImageChops.difference(before, img.convert("RGB")).getbbox()
+            # Only pixels under the mark changed.
+            assert cx - r - stroke - 1 <= x0 and x1 <= cx + r + stroke + 2
+            assert cy - r - stroke - 1 <= y0 and y1 <= cy + r + stroke + 2
+
+
 def test_visualization_png_official_mark_when_intact(tmp_path):
     path = tmp_path / "marked.png"
     Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)

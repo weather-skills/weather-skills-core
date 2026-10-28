@@ -519,7 +519,7 @@ def stamp_figure(path: Path, history: list) -> None:
         return
 
     if suffix == ".gif":
-        from PIL import Image, ImageSequence
+        from PIL import Image, ImageDraw, ImageSequence
 
         # The history goes in the GIF comment block; each frame keeps its duration.
         with Image.open(path) as img:
@@ -527,7 +527,30 @@ def stamp_figure(path: Path, history: list) -> None:
             for frame in ImageSequence.Iterator(img):
                 durations.append(frame.info.get("duration", 0))
                 rgb = frame.convert("RGB")
-                frames.append(_draw_official_mark(rgb) if mark else rgb)
+                shape = _stamp_shape(*rgb.size)
+                if mark and shape is not None:
+                    # A GIF frame holds 256 colours. A smooth mark adds dozens, and Pillow
+                    # would then pick a new palette and recolour the whole frame (a colorbar
+                    # bands differently from frame to frame). Draw it hard-edged in one
+                    # colour, the frame's nearest when its palette is full, so the frame
+                    # still fits and every pixel off the mark keeps its colour.
+                    cx, cy, r, stroke, star = shape
+                    ink = _MARK_INK[:3]
+                    colours = [c for _, c in rgb.getcolors(256) or []]
+                    if len(colours) == 256 and ink not in colours:
+                        ink = min(
+                            colours,
+                            key=lambda c: sum((a - b) ** 2 for a, b in zip(c, ink, strict=True)),
+                        )
+                    draw = ImageDraw.Draw(rgb)
+                    outer = r + stroke / 2
+                    draw.ellipse(
+                        (cx - outer, cy - outer, cx + outer, cy + outer),
+                        outline=ink,
+                        width=round(stroke),
+                    )
+                    draw.polygon(star, fill=ink)
+                frames.append(rgb)
             loop = img.info.get("loop", 0)
         frames[0].save(
             path,
