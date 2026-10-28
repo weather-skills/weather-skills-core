@@ -635,10 +635,9 @@ def roll_and_agg(
     ``align`` is left/right/center label placement. ``stride`` is an int step,
     or a ``stride_dates`` string when ``dim`` is datetime64.
     Methods: ``mean``, ``min``, ``max`` only (rates-first).
-    A datetime axis is split at gaps; windows and strides stay inside each run.
+    The spacing along ``dim`` must be even.
     """
     import numpy as np
-    import xarray as xr
 
     from weather_skills_core import units  # noqa: F401  (registers the .pint accessor)
 
@@ -664,34 +663,28 @@ def roll_and_agg(
     if stride is not None and not isinstance(stride, int) and np.issubdtype(dtype, np.timedelta64):
         raise UsageError("string --stride requires a datetime64 time axis")
 
-    # Check for gaps over 1.5x the median spacing between points, or steps
-    # backwards. These could be true gaps in the data that should not be
-    # rolled through, so each run between them is rolled on its own.
-    values = ds[dim].values
-    cuts = []
-    if np.issubdtype(dtype, np.datetime64) and values.size > 2:
-        diffs = np.diff(values).astype("int64")
-        cuts = np.nonzero((diffs <= 0) | (diffs > 1.5 * np.median(diffs)))[0] + 1
-    runs = np.split(np.arange(values.size), cuts)
+    # A window is a count of samples, so it only spans a fixed length of time
+    # when the spacing is even.
+    diffs = np.diff(ds[dim].values)
+    if diffs.size and (diffs != diffs[0]).any():
+        raise UsageError(
+            f"{dim!r} spacing is not even; a rolling window counts samples, so "
+            "windows would span different lengths of time"
+        )
 
     # Roll plain numbers: pint refuses to sum offset units such as degree_Celsius.
     quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
     plain = ds.pint.dequantify() if quantified else ds
-    pieces = []
-    for run in runs:
-        part = plain.isel({dim: run})
-        rolled = part.rolling({dim: window}, min_periods=min_periods, center=False)
-        out = getattr(rolled, method)(skipna=True, keep_attrs=True)
-        out = out.isel({dim: slice(window - 1, None)})
-        # Label each window by its left, centre or right sample.
-        start = window - 1 - step_shift
-        labels = part[dim].values[start : start + out.sizes[dim]]
-        out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
-        if isinstance(stride, int):
-            out = out.isel({dim: slice(None, None, stride)})
-        elif stride is not None and out.sizes[dim] > 0:
-            times = stride_dates(out[dim].values[0], out[dim].values[-1], stride=str(stride))
-            out = out.sel({dim: times})
-        pieces.append(out)
-    out = xr.concat(pieces, dim=dim)
+    rolled = plain.rolling({dim: window}, min_periods=min_periods, center=False)
+    out = getattr(rolled, method)(skipna=True, keep_attrs=True)
+    out = out.isel({dim: slice(window - 1, None)})
+    # Label each window by its left, centre or right sample.
+    start = window - 1 - step_shift
+    labels = ds[dim].values[start : start + out.sizes[dim]]
+    out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
+    if isinstance(stride, int):
+        out = out.isel({dim: slice(None, None, stride)})
+    elif stride is not None and out.sizes[dim] > 0:
+        times = stride_dates(out[dim].values[0], out[dim].values[-1], stride=str(stride))
+        out = out.sel({dim: times})
     return out.pint.quantify() if quantified else out

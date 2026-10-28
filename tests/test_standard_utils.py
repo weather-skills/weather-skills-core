@@ -767,119 +767,41 @@ def test_roll_and_agg_left_align_on_half_hourly_time():
     assert out["time"].values[-1] == times[48]
 
 
-def test_roll_and_agg_labels_uneven_time_exactly():
-    # Daily axis with 2026-10-04 missing: no window spans the missing day, and
-    # labels are original timestamps.
-    times = np.array(
-        ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06", "2026-10-07"],
-        dtype="datetime64[ns]",
-    )
-    ds = xr.Dataset({"precip": ("time", np.arange(6.0))}, coords={"time": times})
-    ds["time"].attrs["standard_name"] = "time"
-    left = utils.roll_and_agg(ds, 3, "time", method="mean", align="left")
-    np.testing.assert_array_equal(left["time"].values, times[[0, 3]])
-    np.testing.assert_allclose(left["precip"].values, [1.0, 4.0])
-    center = utils.roll_and_agg(ds, 3, "time", method="mean", align="center")
-    np.testing.assert_array_equal(center["time"].values, times[[1, 4]])
-    assert center["time"].attrs["standard_name"] == "time"
-
-
-def _stacked_januaries():
-    times = np.concatenate(
-        [
-            np.arange("2024-01-01", "2024-02-01", dtype="datetime64[D]"),
-            np.arange("2025-01-01", "2025-02-01", dtype="datetime64[D]"),
-        ]
-    ).astype("datetime64[ns]")
-    values = np.concatenate([np.zeros(31), np.full(31, 100.0)])
-    return xr.Dataset({"precip": ("time", values)}, coords={"time": times})
-
-
-def test_roll_and_agg_windows_stay_in_each_january():
-    out = utils.roll_and_agg(_stacked_januaries(), 7, "time", method="mean")
-    # 25 seven-day windows per January, none mixing the two years.
-    assert out.sizes["time"] == 50
-    assert set(np.unique(out["precip"].values)) == {0.0, 100.0}
-    assert str(out["time"].values[25])[:10] == "2025-01-01"
-
-
-@pytest.mark.parametrize("stride", [7, "Monday"])
-def test_roll_and_agg_stride_restarts_each_january(stride):
-    out = utils.roll_and_agg(_stacked_januaries(), 7, "time", method="mean", stride=stride)
-    labels = [str(t)[:10] for t in out["time"].values]
-    if stride == 7:
-        assert labels[0] == "2024-01-01" and "2025-01-01" in labels
-    else:
-        # First Monday of each January: 2024-01-01 and 2025-01-06.
-        assert labels[0] == "2024-01-01" and "2025-01-06" in labels
-    assert all(t[:4] in ("2024", "2025") and t[5:7] == "01" for t in labels)
-
-
-def _stacked(windows):
-    times = np.concatenate(
-        [
-            np.arange(s, np.datetime64(e) + np.timedelta64(1, "D"), dtype="datetime64[D]")
-            for s, e in windows
-        ]
-    ).astype("datetime64[ns]")
-    return xr.Dataset(
-        {"precip": ("time", np.arange(times.size, dtype=float))}, coords={"time": times}
-    )
-
-
 @pytest.mark.parametrize(
-    "windows",
+    "dim, coord",
     [
-        # Out of order: 2025's window comes first, so time steps back a year.
-        [("2025-01-01", "2025-01-10"), ("2024-01-01", "2024-01-10")],
-        # Overlapping: the second window starts inside the first.
-        [("2024-01-01", "2024-01-10"), ("2024-01-05", "2024-01-15")],
+        # Daily axis with 2026-10-04 missing.
+        (
+            "time",
+            np.array(
+                ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06"],
+                dtype="datetime64[ns]",
+            ),
+        ),
+        # IFS-ENS style leads: 3-hourly, then 6-hourly.
+        (
+            "step",
+            (np.array([0, 3, 6, 9, 15, 21]) * np.timedelta64(1, "h")).astype("timedelta64[ns]"),
+        ),
     ],
 )
-def test_roll_and_agg_never_bridges_a_step_back(windows):
-    out = utils.roll_and_agg(_stacked(windows), 3, "time", method="mean")
-    # Each window rolls on its own: (10 - 2) + (len2 - 2) windows.
-    lengths = [int((np.datetime64(e) - np.datetime64(s)).astype(int)) + 1 for s, e in windows]
-    assert out.sizes["time"] == sum(n - 2 for n in lengths)
+def test_roll_and_agg_rejects_uneven_spacing(dim, coord):
+    ds = xr.Dataset({"precip": (dim, np.ones(coord.size))}, coords={dim: coord})
+    with pytest.raises(UsageError, match="spacing is not even"):
+        utils.roll_and_agg(ds, 2, dim, method="mean")
 
 
-@pytest.mark.parametrize("seed", range(40))
-def test_roll_and_agg_stacked_windows_match_rolling_each_alone(seed):
-    rng = np.random.default_rng(seed)
-    windows, cur = [], np.datetime64("2000-01-01")
-    for _ in range(rng.integers(1, 6)):
-        cur = cur + np.timedelta64(int(rng.integers(2, 400)), "D")
-        end = cur + np.timedelta64(int(rng.integers(0, 60)), "D")
-        windows.append((str(cur), str(end)))
-        cur = end
-    window = int(rng.integers(1, 10))
-    method = str(rng.choice(["mean", "min", "max"]))
-    align = str(rng.choice(["left", "center", "right"]))
-    stride = [None, 1, 2, 7][int(rng.integers(4))]
-    ds = _stacked(windows)
-    out = utils.roll_and_agg(ds, window, "time", method=method, align=align, stride=stride)
-
-    shift = {"center": (window - 1) // 2, "right": 0, "left": window - 1}[align]
-    labels, values = [], []
-    for s, e in windows:
-        part = ds.sel(time=slice(s, e))
-        v, t = part["precip"].values, part["time"].values
-        ends = range(window - 1, v.size)
-        run_values = [getattr(np, method)(v[i - window + 1 : i + 1]) for i in ends]
-        run_labels = [t[i - shift] for i in ends]
-        labels += run_labels[::stride]
-        values += run_values[::stride]
-    np.testing.assert_array_equal(out["time"].values, np.array(labels, dtype="datetime64[ns]"))
-    np.testing.assert_allclose(out["precip"].values, values)
-
-
-def test_roll_and_agg_keeps_step_axis_whole_when_spacing_changes():
-    # IFS-ENS style leads: 3-hourly, then 6-hourly. No split on a lead axis.
-    hours = np.concatenate([np.arange(0, 144, 3), np.arange(144, 361, 6)])
-    steps = (hours * np.timedelta64(1, "h")).astype("timedelta64[ns]")
-    ds = xr.Dataset({"precip": ("step", np.ones(hours.size))}, coords={"step": steps})
-    out = utils.roll_and_agg(ds, 4, "step", method="mean")
-    assert out.sizes["step"] == hours.size - 3
+@pytest.mark.parametrize("stride", [None, 2, "Monday"])
+def test_roll_and_agg_leaves_variables_without_the_dim_alone(stride):
+    times = np.arange("2026-01-01", "2026-01-11", dtype="datetime64[D]").astype("datetime64[ns]")
+    ds = xr.Dataset(
+        {"pr": (("time", "lat"), np.ones((10, 2))), "mask": ("lat", [1.0, 0.0]), "sc": 3.0},
+        coords={"time": times, "lat": [0.0, 1.0]},
+    )
+    out = utils.roll_and_agg(ds, 3, "time", method="mean", stride=stride)
+    assert out["pr"].dims == ("time", "lat")
+    assert out["mask"].dims == ("lat",)
+    assert out["sc"].dims == ()
 
 
 @pytest.mark.parametrize("align", ["left", "center", "right"])
