@@ -800,3 +800,35 @@ def test_stamp_precip_amounts_leaves_non_precip_kg_m2_alone():
     rate["precip"].attrs["standard_name"] = "lwe_precipitation_rate"
     stamped = stamp_precip_amounts(rate)["precip"].attrs["standard_name"]
     assert stamped == "lwe_thickness_of_precipitation_amount"
+
+
+def test_per_cell_coverage_blanks_cells_and_drops_intervals():
+    from weather_skills_core.units import coverage_variable, quantify_dataset
+
+    ds = make_gridded(n_time=2, lats=(1.0,), lons=(10.0, 11.0))
+    ds["precip"].attrs["ancillary_variables"] = "precip_coverage"
+    cov = np.array([[[1.0, 6 / 7]], [[0.5, 0.0]]])  # two stations each short, different days
+    ds["precip_coverage"] = (ds["precip"].dims, cov, {"units": "1"})
+    ds = ds.assign_coords(aggregation_coverage=("time", cov.max(axis=(1, 2))))
+    q = quantify_dataset(ds)
+    assert coverage_variable(q, "precip").name == "precip_coverage"
+    out = filter_min_coverage(q, "time", 1.0)
+    assert out.sizes["time"] == 1  # the second interval has no complete cell
+    assert np.isnan(out["precip"].values[0, 0, 1]) and out["precip"].values[0, 0, 0] == 1.0
+    cells = filter_min_coverage(q, None, 0.5)
+    assert np.isnan(cells["precip"].values[:, 0, :]).tolist() == [[False, False], [False, True]]
+    assert cells["precip"].pint.units is not None
+
+
+def test_temperature_named_variables_need_temperature_units():
+    from weather_skills_core.units import classify_variable, to_standard_units
+
+    assert classify_variable("t2m_coverage", units="1") is None
+    assert classify_variable("t2m", units="delta_degC") == "temp"
+    assert classify_variable("t2m", units="K") == "temp"
+    ds = make_gridded(name="t2m", units="K")
+    ds["t2m"].attrs["ancillary_variables"] = "t2m_coverage"
+    ds["t2m_coverage"] = (ds["t2m"].dims, np.ones(ds["t2m"].shape), {"units": "1"})
+    out = to_standard_units(ds)
+    assert out["t2m"].attrs["units"] == "degree_Celsius"
+    assert out["t2m_coverage"].attrs["units"] == "1"

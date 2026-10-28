@@ -6,12 +6,14 @@ import sys
 import numpy as np
 import xarray as xr
 
+from weather_skills_core.cf import measured_variables
 from weather_skills_core.errors import DataError, UsageError
 from weather_skills_core.standard_dataset import names_for
 from weather_skills_core.standard_utils import TIME_LABELS, calendar_expected_steps
 from weather_skills_core.units import (
     AGGREGATION_COVERAGE_COORD,
     AGGREGATION_PERIOD_ATTR,
+    coverage_variable,
     data_interval_of,
     format_duration,
     infer_timestep,
@@ -129,7 +131,7 @@ def summarize(
                 f"by {b!r} runs along time but is not a calendar time label "
                 f"({', '.join(TIME_LABELS)}), so its full calendar period is unknown"
             )
-    selected = list(dict.fromkeys(variables)) if variables else list(ds.data_vars)
+    selected = list(dict.fromkeys(variables)) if variables else measured_variables(ds)
     for var in selected:
         if var not in ds.data_vars:
             raise UsageError(f"variable {var!r} not in dataset (have {list(ds.data_vars)})")
@@ -217,6 +219,10 @@ def summarize(
         # With by labels, only variables carrying every label dim are summarized.
         if not rdims or not set(group_dims) <= set(da.dims):
             continue
+        # The input's per-cell coverage no longer describes the reduced variable.
+        input_coverage = coverage_variable(ds, var)
+        if input_coverage is not None and input_coverage.name not in selected:
+            out = out.drop_vars(input_coverage.name)
         units = da.pint.units
         over_time = [d for d in rdims if d in ("time", "step")]
         if method == "sum" and over_time and units is not None:
@@ -271,7 +277,10 @@ def summarize(
                 # too many of the group's calendar steps is left out before any spatial
                 # reduction, so cells missing different days never add up to a complete group.
                 present = sub.notnull()
-                if step_share is not None:
+                if input_coverage is not None:
+                    # Per-cell input coverage: a 3/7 week at this cell is 3/7 of a step.
+                    present = present * input_coverage.pint.dequantify().isel(index).fillna(0)
+                elif step_share is not None:
                     present = present * xr.DataArray(step_share[index["time"]], dims="time")
                 expected = next(g["expected"] for g in parts if g["expected"] is not None)
                 cell_share = present.sum("time") / expected
@@ -314,7 +323,7 @@ def summarize(
             values if units is None else values * units,
             dims=[*qdims, *kept, *by],
             coords=coords,
-            attrs=da.attrs,
+            attrs={k: v for k, v in da.attrs.items() if k != "ancillary_variables"},
         )
         if time_by and method == "sum" and min_coverage < 1.0:
             # Kept so the output records which sums are estimates.
