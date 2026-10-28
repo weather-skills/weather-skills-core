@@ -266,6 +266,66 @@ def test_run_loop_start_after_end_exits(tmp_path):
     assert exc.value.code == 2
 
 
+def test_run_loop_repeated_time_windows_pair_up(tmp_path):
+    from datetime import date
+
+    out = tmp_path / "out.zarr"
+    seen = {}
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--start-time", action="append")
+    @weather_skill.argument("--end-time", action="append")
+    def skill(output, start_time, end_time, **kwargs):
+        seen["windows"] = list(zip(start_time, end_time, strict=True))
+        return make_gridded()
+
+    argv = ["-o", str(out), "--start-time", "2024-01-01", "--end-time", "2024-01-31"]
+    skill([*argv, "--start-time", "2025-01-01", "--end-time", "2025-01-31"])
+    assert seen["windows"] == [
+        (date(2024, 1, 1), date(2024, 1, 31)),
+        (date(2025, 1, 1), date(2025, 1, 31)),
+    ]
+    entry = load_history(out)[-1]["args"]
+    assert entry["start_time"] == ["2024-01-01", "2025-01-01"]
+    assert entry["end_time"] == ["2024-01-31", "2025-01-31"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--start-time", "2025-01-01"],
+        ["--start-time", "2025-02-01", "--end-time", "2025-01-01"],
+    ],
+)
+def test_run_loop_repeated_time_windows_unpaired_or_reversed_exit(tmp_path, extra):
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--start-time", action="append")
+    @weather_skill.argument("--end-time", action="append")
+    def skill(output, start_time, end_time, **kwargs):
+        return make_gridded()
+
+    argv = ["-o", str(tmp_path / "out.zarr"), "--start-time", "2024-01-01"]
+    with pytest.raises(SystemExit) as exc:
+        skill([*argv, "--end-time", "2024-01-31", *extra])
+    assert exc.value.code == 2
+
+
+def test_run_loop_output_inside_a_file_exits_before_running(tmp_path, capsys):
+    (tmp_path / "check.csv").write_text("a,b\n")
+    ran = []
+
+    @weather_skill(name="s", version="0.1.0")
+    def skill(output, **kwargs):
+        ran.append(True)
+        return make_gridded()
+
+    with pytest.raises(SystemExit) as exc:
+        skill(["-o", str(tmp_path / "check.csv" / "out.zarr")])
+    assert exc.value.code == 2
+    assert not ran
+    assert "which is a file" in capsys.readouterr().err
+
+
 def test_run_loop_date_parsed(tmp_path):
     out = tmp_path / "out.zarr"
     seen = {}
@@ -279,6 +339,21 @@ def test_run_loop_date_parsed(tmp_path):
     skill(["-o", str(out), "--date", "2026-01-15"])
     assert seen["date"] == "2026-01-15"
     assert load_history(out)[-1]["args"]["date"] == "2026-01-15"
+
+
+def test_run_loop_repeated_date_parsed(tmp_path):
+    out = tmp_path / "out.zarr"
+    seen = {}
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--date", action="append")
+    def skill(output, date, **kwargs):
+        seen["dates"] = [d.isoformat() for d in date]
+        return make_gridded()
+
+    skill(["-o", str(out), "--date", "2024-01-15", "--date", "2025-01-15"])
+    assert seen["dates"] == ["2024-01-15", "2025-01-15"]
+    assert load_history(out)[-1]["args"]["date"] == ["2024-01-15", "2025-01-15"]
 
 
 def test_run_loop_two_inputs(tmp_path):
@@ -379,6 +454,44 @@ def test_run_loop_refuses_plain_file_output(tmp_path, capsys):
     assert exc.value.code == 2
     assert "existing file, not a Zarr store" in capsys.readouterr().err
     assert out.read_text() == "keep me"
+
+
+def test_run_loop_refuses_a_folder_that_is_not_a_zarr(tmp_path, capsys):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "Documents"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    out.mkdir()
+    (out / "notes.txt").write_text("keep me")
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, **kwargs):
+        return ds
+
+    with pytest.raises(SystemExit) as exc:
+        copy(["-i", str(src), "-o", str(out)])
+    assert exc.value.code == 2
+    assert "existing folder, not a Zarr store" in capsys.readouterr().err
+    assert (out / "notes.txt").read_text() == "keep me"
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3, None])
+def test_run_loop_replaces_an_earlier_zarr_or_empty_folder(tmp_path, zarr_format):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    if zarr_format is None:
+        out.mkdir()
+    else:
+        make_gridded(n_time=1).to_zarr(out, mode="w", zarr_format=zarr_format)
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, **kwargs):
+        return ds
+
+    copy(["-i", str(src), "-o", str(out)])
+    assert xr.open_zarr(out).sizes["time"] == make_gridded().sizes["time"]
 
 
 def test_run_loop_no_artifact(tmp_path):
@@ -718,3 +831,46 @@ def test_float64_input_joins_float32_output(tmp_path):
     passthrough(["-i", str(old), "-o", str(new)])
     pair(["-i", str(new), "-i", str(old), "-o", str(out)])
     assert seen["joined"].sizes["latitude"] == len(lats)
+
+
+def _zip_dir(src: Path, dest: Path, under: str | None) -> Path:
+    import zipfile
+
+    with zipfile.ZipFile(dest, "w") as zf:
+        for p in sorted(src.rglob("*")):
+            if p.is_file():
+                rel = p.relative_to(src).as_posix()
+                zf.write(p, f"{under}/{rel}" if under else rel)
+    return dest
+
+
+@pytest.mark.parametrize("under", [None, "sample.zarr"])
+def test_zipped_zarr_input_is_read(tmp_path, under):
+    """A zip of a Zarr store opens, whether the store sits at the root or one folder down."""
+    src = tmp_path / "sample.zarr"
+    make_gridded().to_zarr(src, consolidated=True)
+    zipped = _zip_dir(src, tmp_path / "sample.zarr.zip", under)
+    seen = {}
+
+    @weather_skill(name="s", version="1.0.0", output=False)
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), required=True)
+    def skill(ds, **kwargs):
+        seen["vars"] = sorted(ds.data_vars)
+
+    skill(["-i", str(zipped)])
+    assert seen["vars"] == sorted(make_gridded().data_vars)
+
+
+def test_netcdf_input_points_to_netcdf_io(tmp_path, capsys):
+    nc = tmp_path / "rain.nc"
+    nc.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\0" * 64)
+
+    @weather_skill(name="s", version="1.0.0", output=False)
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), required=True)
+    def skill(ds, **kwargs):
+        pass
+
+    with pytest.raises(SystemExit) as exc:
+        skill(["-i", str(nc)])
+    assert exc.value.code == 2
+    assert "netcdf-io" in capsys.readouterr().err
