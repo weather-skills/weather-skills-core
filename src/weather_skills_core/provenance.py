@@ -29,16 +29,24 @@ _HTML_META_RE = re.compile(
 _SVG_META_RE = re.compile(
     rf'<metadata\s+id=["\']{re.escape(HISTORY_ATTR)}["\']\s*>(.*?)</metadata>', re.DOTALL
 )
+_SVG_STAMP_RE = re.compile(r'<g\s+id="weather_skills_stamp".*?</g>', re.DOTALL)
+
+# The provenance stamp: a ring around a star, bottom-right, drawn on a figure
+# whose history chain is intact. One shape, drawn as pixels (PNG, JPEG, GIF
+# frames) or as vector shapes (SVG, PDF), in rubber-stamp crimson (RGBA).
+_MARK_INK = (165, 15, 45, 235)
 
 
 def hash_zarr(zarr_path: Path) -> str:
-    """Stable sha256 of a zarr directory's relative paths + file bytes."""
+    """Stable sha256 of a zarr directory's relative paths + file bytes.
+
+    A single file (a zipped Zarr, a table) hashes its bytes.
+    """
     zarr_path = Path(zarr_path)
-    h = hashlib.sha256()
     if zarr_path.is_file():
-        # A zipped Zarr: the archive's bytes stand for the store.
-        h.update(zarr_path.read_bytes())
-        return h.hexdigest()
+        with zarr_path.open("rb") as f:
+            return hashlib.file_digest(f, "sha256").hexdigest()
+    h = hashlib.sha256()
     for p in sorted(zarr_path.rglob("*")):
         if p.is_file():
             h.update(str(p.relative_to(zarr_path)).encode())
@@ -166,12 +174,6 @@ def chain_is_intact(history) -> bool:
     return not violations
 
 
-# The provenance stamp: a ring around a star, bottom-right, drawn on a figure
-# whose history chain is intact. One shape, drawn as pixels (PNG, JPEG, GIF
-# frames) or as vector shapes (SVG, PDF), in rubber-stamp crimson (RGBA).
-_MARK_INK = (165, 15, 45, 235)
-
-
 def _stamp_shape(width: float, height: float, px: float = 1.0):
     """Ring and star of the stamp in the figure's own units, y down.
 
@@ -262,9 +264,6 @@ def zipped_zarr(path: Path):
         f"{path} is a zip but holds no single Zarr store at its root or one folder down "
         f"(Zarr folders found: {found}); zip one .zarr folder, or upload NetCDF instead"
     )
-
-
-_SVG_STAMP_RE = re.compile(r'<g\s+id="weather_skills_stamp".*?</g>', re.DOTALL)
 
 
 def _svg_official_mark(text: str, mark: bool) -> str:
@@ -565,6 +564,11 @@ def stamp_figure(path: Path, history: list) -> None:
     if suffix in (".geojson", ".json"):
         # A top-level key; in GeoJSON a foreign member, which RFC 7946 allows.
         doc = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(doc, dict):
+            raise SkillError(
+                f"{path} holds a JSON {type(doc).__name__}, not an object; "
+                "history can only be stamped on a JSON object"
+            )
         doc[HISTORY_ATTR] = payload
         path.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
         return
@@ -572,7 +576,7 @@ def stamp_figure(path: Path, history: list) -> None:
     if suffix in TABLE_SUFFIXES:
         # A table has nowhere to keep it, so the history goes in a sidecar with the
         # table's hash. A table edited after the skill wrote it no longer matches.
-        sidecar = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), HISTORY_ATTR: payload}
+        sidecar = {"sha256": hash_zarr(path), HISTORY_ATTR: payload}
         history_sidecar(path).write_text(json.dumps(sidecar, indent=1), encoding="utf-8")
         return
 
@@ -641,7 +645,7 @@ def read_raw_history(path: Path) -> str | None:
         if not sidecar.is_file():
             return None
         meta = json.loads(sidecar.read_text(encoding="utf-8"))
-        if meta.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest():
+        if meta.get("sha256") != hash_zarr(path):
             return None
         return meta.get(HISTORY_ATTR) or None
 

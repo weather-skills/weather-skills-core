@@ -9,6 +9,7 @@ from conftest import make_gridded
 from PIL import Image
 
 from weather_skills_core import provenance
+from weather_skills_core.errors import SkillError
 
 
 def write_store(path, history=None, fill=1.0):
@@ -364,6 +365,14 @@ def test_geojson_history_is_a_top_level_member(tmp_path):
     assert doc["type"] == "FeatureCollection"
     assert json.loads(doc[provenance.HISTORY_ATTR]) == chain
     assert provenance.load_figure_history(path) == chain
+
+
+def test_json_list_output_is_refused(tmp_path):
+    path = tmp_path / "values.json"
+    path.write_text("[1, 2, 3]")
+    with pytest.raises(SkillError, match="not an object"):
+        provenance.stamp_figure(path, [entry()])
+    assert path.read_text() == "[1, 2, 3]"
 
 
 @pytest.mark.parametrize("name", ["table.csv", "table.xlsx"])
