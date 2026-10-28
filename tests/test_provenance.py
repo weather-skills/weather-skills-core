@@ -228,6 +228,45 @@ def test_visualization_svg(tmp_path):
     ET.fromstring(text.split("?>", 1)[1])  # still well-formed XML
 
 
+def test_visualization_pdf_official_mark_when_intact(tmp_path):
+    from pypdf import PdfReader
+
+    path = tmp_path / "marked.pdf"
+    Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
+    header = PdfReader(path).pdf_header
+    provenance.stamp_figure(path, [entry()])
+    reader = PdfReader(path)
+    # The stamp is drawn over the page in the stamp ink; the PDF version is kept.
+    ink = " ".join(f"{c / 255:.3f}" for c in provenance._MARK_INK[:3]).encode()
+    assert ink + b" RG" in reader.pages[0].get_contents().get_data()
+    assert reader.pdf_header == header
+
+    path = tmp_path / "invalid.pdf"
+    Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
+    provenance.stamp_figure(path, [{"skill": "", "version": "0", "args": {}, "input": None}])
+    assert ink not in PdfReader(path).pages[0].get_contents().get_data()
+
+
+def test_visualization_svg_official_mark_when_intact(tmp_path):
+    path = tmp_path / "marked.svg"
+    path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" '
+        'viewBox="0 0 400 300"><rect width="400" height="300"/></svg>',
+        encoding="utf-8",
+    )
+    provenance.stamp_figure(path, [entry()])
+    provenance.stamp_figure(path, [entry()])
+    text = path.read_text(encoding="utf-8")
+    # One stamp after a restamp, drawn last so it sits on top.
+    assert text.count('id="weather_skills_stamp"') == 1
+    assert text.index('id="weather_skills_stamp"') > text.index("<rect")
+    # A broken chain removes the stamp but keeps the history.
+    provenance.stamp_figure(path, [{"skill": "", "version": "0", "args": {}, "input": None}])
+    text = path.read_text(encoding="utf-8")
+    assert "weather_skills_stamp" not in text
+    assert provenance.load_figure_history(path) is not None
+
+
 def test_visualization_jpeg(tmp_path):
     path = tmp_path / "x.jpg"
     Image.new("RGB", (4, 4)).save(path, quality=90)

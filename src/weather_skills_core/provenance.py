@@ -29,6 +29,7 @@ _HTML_META_RE = re.compile(
 _SVG_META_RE = re.compile(
     rf'<metadata\s+id=["\']{re.escape(HISTORY_ATTR)}["\']\s*>(.*?)</metadata>', re.DOTALL
 )
+_SVG_STAMP_RE = re.compile(r'<g\s+id="weather_skills_stamp".*?</g>', re.DOTALL)
 
 
 def hash_zarr(zarr_path: Path) -> str:
@@ -206,6 +207,31 @@ def _render_circular_stamp(diameter: int):
     out_w = max(1, round(stamp.width / scale))
     out_h = max(1, round(stamp.height / scale))
     return stamp.resize((out_w, out_h), resample=Image.Resampling.LANCZOS)
+
+
+def _vector_stamp(width: float, height: float, px: float = 1.0):
+    """The raster stamp's ring and star in a vector figure's own units, y down.
+
+    ``px`` is figure units per pixel (0.75 for PDF points). Returns ``None``
+    when the figure is too small, like ``_draw_official_mark``.
+    """
+    import math
+
+    w, h = width / px, height / px
+    if min(w, h) < 96:
+        return None
+    diameter = max(24, min(int(min(w, h) * 0.035), 28))
+    margin = max(4, int(min(w, h) * 0.015))
+    outer_r = diameter / 2 - 1
+    stroke = max(2, diameter / 22)
+    cx, cy = w - margin - diameter / 2, h - margin - diameter / 2
+    star = []
+    for i in range(10):
+        r = outer_r * 0.48 if i % 2 == 0 else outer_r * 0.48 * 0.42
+        # Turned 6 degrees clockwise, as the raster stamp is.
+        a = -math.pi / 2 + i * math.pi / 5 + math.radians(6)
+        star.append(((cx + r * math.cos(a)) * px, (cy + r * math.sin(a)) * px))
+    return cx * px, cy * px, (outer_r - stroke / 2) * px, stroke * px, star
 
 
 def _draw_official_mark(img):
@@ -458,11 +484,39 @@ def stamp_figure(path: Path, history: list) -> None:
         return
 
     if suffix == ".pdf":
-        from pypdf import PdfWriter
+        from pypdf import PageObject, PdfReader, PdfWriter
+        from pypdf.generic import DecodedStreamObject, NameObject
 
         # A custom key in the document info dictionary; viewers ignore it.
         writer = PdfWriter(clone_from=path)
+        writer.pdf_header = PdfReader(path).pdf_header
         writer.add_metadata({f"/{HISTORY_ATTR}": payload})
+        page = writer.pages[0]
+        box = page.mediabox
+        stamp = _vector_stamp(float(box.width), float(box.height), px=0.75) if mark else None
+        if stamp:
+            # Ring as four Bezier arcs and a filled star, in PDF's y-up page space.
+            cx, cy, r, stroke, star = stamp
+            x0, top = float(box.left), float(box.top)
+            cx, cy = x0 + cx, top - cy
+            k = 0.5523 * r
+            ink = " ".join(f"{c / 255:.3f}" for c in _MARK_INK[:3])
+            ops = [
+                f"q {ink} RG {ink} rg {stroke:.2f} w",
+                f"{cx + r:.2f} {cy:.2f} m",
+                f"{cx + r:.2f} {cy + k:.2f} {cx + k:.2f} {cy + r:.2f} {cx:.2f} {cy + r:.2f} c",
+                f"{cx - k:.2f} {cy + r:.2f} {cx - r:.2f} {cy + k:.2f} {cx - r:.2f} {cy:.2f} c",
+                f"{cx - r:.2f} {cy - k:.2f} {cx - k:.2f} {cy - r:.2f} {cx:.2f} {cy - r:.2f} c",
+                f"{cx + k:.2f} {cy - r:.2f} {cx + r:.2f} {cy - k:.2f} {cx + r:.2f} {cy:.2f} c S",
+            ]
+            for i, (x, y) in enumerate(star):
+                ops.append(f"{x0 + x:.2f} {top - y:.2f} {'m' if i == 0 else 'l'}")
+            ops.append("h f Q")
+            content = DecodedStreamObject()
+            content.set_data("\n".join(ops).encode())
+            overlay = PageObject.create_blank_page(width=box.width, height=box.height)
+            overlay[NameObject("/Contents")] = content
+            page.merge_page(overlay)
         writer.write(path)
         return
 
@@ -473,6 +527,23 @@ def stamp_figure(path: Path, history: list) -> None:
             text = _SVG_META_RE.sub(lambda m: meta, text, count=1)
         else:
             text = re.sub(r"(<svg\b[^>]*>)", lambda m: f"{m.group(1)}{meta}", text, count=1)
+        text = _SVG_STAMP_RE.sub("", text)
+        size = re.search(r'<svg\b[^>]*?viewBox="[-\d.]+ [-\d.]+ ([\d.]+) ([\d.]+)"', text)
+        stamp = _vector_stamp(float(size[1]), float(size[2])) if mark and size else None
+        if stamp:
+            # Drawn last, so it sits on top of the figure.
+            cx, cy, r, stroke, star = stamp
+            ink = "rgb({}, {}, {})".format(*_MARK_INK[:3])
+            alpha = _MARK_INK[3] / 255
+            points = " ".join(f"{x:.2f},{y:.2f}" for x, y in star)
+            mark_svg = (
+                f'<g id="weather_skills_stamp" opacity="{alpha:.2f}">'
+                f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" fill="none" '
+                f'stroke="{ink}" stroke-width="{stroke:.2f}"/>'
+                f'<polygon points="{points}" fill="{ink}"/></g>'
+            )
+            end = text.rindex("</svg>")
+            text = text[:end] + mark_svg + text[end:]
         path.write_text(text, encoding="utf-8")
         return
 
