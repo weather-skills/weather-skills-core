@@ -266,6 +266,22 @@ def test_run_loop_start_after_end_exits(tmp_path):
     assert exc.value.code == 2
 
 
+def test_run_loop_output_inside_a_file_exits_before_running(tmp_path, capsys):
+    (tmp_path / "check.csv").write_text("a,b\n")
+    ran = []
+
+    @weather_skill(name="s", version="0.1.0")
+    def skill(output, **kwargs):
+        ran.append(True)
+        return make_gridded()
+
+    with pytest.raises(SystemExit) as exc:
+        skill(["-o", str(tmp_path / "check.csv" / "out.zarr")])
+    assert exc.value.code == 2
+    assert not ran
+    assert "which is a file" in capsys.readouterr().err
+
+
 def test_run_loop_date_parsed(tmp_path):
     out = tmp_path / "out.zarr"
     seen = {}
@@ -379,6 +395,44 @@ def test_run_loop_refuses_plain_file_output(tmp_path, capsys):
     assert exc.value.code == 2
     assert "existing file, not a Zarr store" in capsys.readouterr().err
     assert out.read_text() == "keep me"
+
+
+def test_run_loop_refuses_a_folder_that_is_not_a_zarr(tmp_path, capsys):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "Documents"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    out.mkdir()
+    (out / "notes.txt").write_text("keep me")
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, **kwargs):
+        return ds
+
+    with pytest.raises(SystemExit) as exc:
+        copy(["-i", str(src), "-o", str(out)])
+    assert exc.value.code == 2
+    assert "existing folder, not a Zarr store" in capsys.readouterr().err
+    assert (out / "notes.txt").read_text() == "keep me"
+
+
+@pytest.mark.parametrize("zarr_format", [2, 3, None])
+def test_run_loop_replaces_an_earlier_zarr_or_empty_folder(tmp_path, zarr_format):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    if zarr_format is None:
+        out.mkdir()
+    else:
+        make_gridded(n_time=1).to_zarr(out, mode="w", zarr_format=zarr_format)
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, **kwargs):
+        return ds
+
+    copy(["-i", str(src), "-o", str(out)])
+    assert xr.open_zarr(out).sizes["time"] == make_gridded().sizes["time"]
 
 
 def test_run_loop_no_artifact(tmp_path):
