@@ -699,20 +699,59 @@ def test_roll_and_agg_left_align_on_half_hourly_time():
     assert out["time"].values[-1] == times[48]
 
 
-def test_roll_and_agg_labels_uneven_time_exactly():
-    # Daily axis with 2026-10-04 missing: labels must be original timestamps.
+def test_roll_and_agg_never_bridges_a_missing_day():
+    # Daily axis with 2026-10-04 missing: no window spans the gap.
     times = np.array(
-        ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06"],
+        ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-05", "2026-10-06", "2026-10-07"],
         dtype="datetime64[ns]",
     )
-    ds = xr.Dataset({"precip": ("time", np.arange(5.0))}, coords={"time": times})
+    ds = xr.Dataset({"precip": ("time", np.arange(6.0))}, coords={"time": times})
     ds["time"].attrs["standard_name"] = "time"
     left = utils.roll_and_agg(ds, 3, "time", method="mean", align="left")
-    np.testing.assert_array_equal(left["time"].values, times[:3])
-    np.testing.assert_allclose(left["precip"].values, [1.0, 2.0, 3.0])
+    np.testing.assert_array_equal(left["time"].values, times[[0, 3]])
+    np.testing.assert_allclose(left["precip"].values, [1.0, 4.0])
     center = utils.roll_and_agg(ds, 3, "time", method="mean", align="center")
-    np.testing.assert_array_equal(center["time"].values, times[1:4])
+    np.testing.assert_array_equal(center["time"].values, times[[1, 4]])
     assert center["time"].attrs["standard_name"] == "time"
+
+
+def _januaries(years):
+    """Daily Januaries of ``years`` stacked on one axis, each filled with its year."""
+    times = np.concatenate(
+        [np.arange(f"{y}-01-01", f"{y}-02-01", dtype="datetime64[D]") for y in years]
+    ).astype("datetime64[ns]")
+    values = times.astype("datetime64[Y]").astype(int) + 1970.0
+    return xr.Dataset({"precip": ("time", values)}, coords={"time": times})
+
+
+def test_roll_and_agg_stacked_januaries_stay_within_each_year():
+    ds = _januaries([2024, 2025, 2026])
+    out = utils.roll_and_agg(ds, 7, "time", method="mean", align="left")
+    # 25 seven-day windows per January, none reaching into the next year.
+    assert out.sizes["time"] == 3 * 25
+    labels = out["time"].values.astype("datetime64[D]")
+    np.testing.assert_allclose(
+        out["precip"].values, labels.astype("datetime64[Y]").astype(int) + 1970.0
+    )
+    assert labels.astype(str).tolist()[24:26] == ["2024-01-25", "2025-01-01"]
+
+
+def test_roll_and_agg_stacked_januaries_stride_restarts_each_year():
+    ds = _januaries([2024, 2025])
+    out = utils.roll_and_agg(ds, 7, "time", method="max", align="left", stride=7)
+    starts = out["time"].values.astype("datetime64[D]").astype(str).tolist()
+    assert starts == [f"{y}-01-{d:02d}" for y in (2024, 2025) for d in (1, 8, 15, 22)]
+
+
+def test_roll_and_agg_stacked_januaries_calendar_stride_skips_the_gap():
+    ds = _januaries([2024, 2025])
+    out = utils.roll_and_agg(ds, 7, "time", method="mean", align="left", stride="Monday")
+    starts = out["time"].values.astype("datetime64[D]").astype(str).tolist()
+    assert starts == ["2024-01-01", "2024-01-08", "2024-01-15", "2024-01-22"] + [
+        "2025-01-06",
+        "2025-01-13",
+        "2025-01-20",
+    ]
 
 
 @pytest.mark.parametrize("align", ["left", "center", "right"])
