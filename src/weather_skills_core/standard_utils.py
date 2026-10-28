@@ -670,14 +670,9 @@ def roll_and_agg(
     if stride is not None and not isinstance(stride, int) and np.issubdtype(dtype, np.timedelta64):
         raise UsageError("string --stride requires a datetime64 time axis")
 
-    # Split a time axis at its gaps (any spacing over 1.5x the median): stacked
-    # windows such as each January, or a missing day. A step back or a repeat
-    # (windows out of order or overlapping) also starts a new run. The median
-    # is the axis's own spacing only while most steps are not gaps, so a
-    # handful of scattered dates is not split. Each run is rolled and
-    # strided on its own, so a window never bridges a gap and a stride restarts
-    # at each run. Lead (step) axes change spacing on purpose (3 h then 6 h), so
-    # they are rolled whole.
+    # Split a datetime axis into runs at gaps (a step over 1.5x the median) and
+    # at steps backwards, e.g. between stacked Januaries. Windows and strides
+    # stay inside a run. Lead (step) axes change spacing on purpose; not split.
     values = ds[dim].values
     cuts = []
     if np.issubdtype(dtype, np.datetime64) and values.size > 2:
@@ -685,8 +680,7 @@ def roll_and_agg(
         cuts = np.nonzero((diffs <= 0) | (diffs > 1.5 * np.median(diffs)))[0] + 1
     runs = np.split(np.arange(values.size), cuts)
 
-    # Roll on plain numbers: pint refuses the window sum behind a mean for an
-    # offset unit (degree_Celsius), though mean/min/max of one are well defined.
+    # Roll plain numbers: pint refuses to sum offset units such as degree_Celsius.
     quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
     plain = ds.pint.dequantify() if quantified else ds
     pieces = []
@@ -695,8 +689,7 @@ def roll_and_agg(
         rolled = part.rolling({dim: window}, min_periods=min_periods, center=False)
         out = getattr(rolled, method)(skipna=True, keep_attrs=True)
         out = out.isel({dim: slice(window - 1, None)})
-        # Label each window with the original coordinate of its left/center/right
-        # sample, so uneven or sub-daily spacing is labelled exactly.
+        # Label each window by its left, centre or right sample.
         start = window - 1 - step_shift
         labels = part[dim].values[start : start + out.sizes[dim]]
         out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
@@ -706,5 +699,5 @@ def roll_and_agg(
             times = stride_dates(out[dim].values[0], out[dim].values[-1], stride=str(stride))
             out = out.sel({dim: times})
         pieces.append(out)
-    out = xr.concat(pieces, dim=dim) if len(pieces) > 1 else pieces[0]
+    out = xr.concat(pieces, dim=dim)
     return out.pint.quantify() if quantified else out
