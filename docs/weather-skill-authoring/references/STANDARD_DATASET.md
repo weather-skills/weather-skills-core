@@ -125,16 +125,18 @@ Chaining works like this:
   entry, and each item in its `input` list carries that parent's whole
   history under `history`. Read it as a tree, not a list.
 
-Figures (PNG, JPEG, GIF, HTML) store the same JSON in file metadata. A PNG,
-JPEG or GIF (every frame) with a valid history also gets a small star stamp in
-the corner.
+Figures (PNG, JPEG, GIF, HTML, PDF, SVG) and GeoJSON/JSON store the same
+JSON in file metadata; CSV and Excel tables get a sidecar file. A PNG, JPEG,
+GIF (every frame), PDF or SVG with a valid history also gets a small star
+stamp in the corner.
 
 ## Open and write
 
 The decorator does all Zarr I/O. Skills never call `open_zarr` or
 `to_zarr` for their main input and output.
 
-**On open**, each `Dataset` input is checked against its declared dims,
+**On open**, a `Dataset` input may be a Zarr folder or a zip of one (the
+store at the zip root or one folder down). Each is checked against its declared dims,
 GRIB-style unit strings are normalized, `step` is cast to
 `timedelta64[ns]`, lat/lon are snapped (below), and pint units are
 attached from each variable's `units` attr.
@@ -149,7 +151,9 @@ strings and then:
 - data-variable attrs the skill dropped are copied back from the first
   input (matching variable names), and global attrs are inherited from it;
 - provenance is stamped, encodings are cleared, and the store is written
-  with `consolidated=True`, replacing any existing store at that path.
+  with `consolidated=True`. An existing path is replaced only if it is
+  an empty folder or an earlier skill output; anything else exits 2
+  before the skill runs.
 
 What the skill still owns: CF-compliant names and attrs on anything it
 creates, NaN for missing values, value conversions (`to_standard_units`),
