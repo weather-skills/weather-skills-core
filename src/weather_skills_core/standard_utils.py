@@ -678,7 +678,7 @@ def roll_and_agg(
     cuts = []
     if np.issubdtype(dtype, np.datetime64) and values.size > 2:
         diffs = np.diff(values).astype("int64")
-        cuts = np.nonzero(diffs > 1.5 * np.median(diffs))[0] + 1
+        cuts = np.nonzero((diffs <= 0) | (diffs > 1.5 * np.median(diffs)))[0] + 1
     runs = np.split(np.arange(values.size), cuts)
 
     # Roll on plain numbers: pint refuses the window sum behind a mean for an

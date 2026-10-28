@@ -200,8 +200,7 @@ def _open_zarr(path, io_spec=None):
                 magic = f.read(4)
             if magic in (b"CDF\x01", b"CDF\x02", b"\x89HDF"):
                 raise UsageError(
-                    f"{path} is a NetCDF file, not a Zarr store; read it into a Zarr with the "
-                    f"netcdf-io skill first (--netcdf {path.name} -o {path.stem}.zarr)"
+                    f"{path} is a NetCDF file, not a Zarr store; convert it to a Zarr first"
                 )
             raise UsageError(f"{path} is a file, not a Zarr store (a folder or a zipped Zarr)")
         store, group = provenance_mod.zipped_zarr(path)

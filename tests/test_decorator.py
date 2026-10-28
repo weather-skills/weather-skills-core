@@ -904,7 +904,7 @@ def test_zipped_zarr_input_is_read(tmp_path, under):
     assert seen["vars"] == sorted(make_gridded().data_vars)
 
 
-def test_netcdf_input_points_to_netcdf_io(tmp_path, capsys):
+def test_netcdf_input_says_it_is_netcdf(tmp_path, capsys):
     nc = tmp_path / "rain.nc"
     nc.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\0" * 64)
 
@@ -916,4 +916,4 @@ def test_netcdf_input_points_to_netcdf_io(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         skill(["-i", str(nc)])
     assert exc.value.code == 2
-    assert "netcdf-io" in capsys.readouterr().err
+    assert "is a NetCDF file" in capsys.readouterr().err

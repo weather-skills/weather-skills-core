@@ -103,7 +103,8 @@ def convert_standard_args(args, arguments) -> dict:
     starts = params.get("start_time")
     ends = params.get("end_time")
     if isinstance(starts, list) or isinstance(ends, list):
-        starts, ends = starts or [], ends or []
+        starts = starts if isinstance(starts, list) else [] if starts is None else [starts]
+        ends = ends if isinstance(ends, list) else [] if ends is None else [ends]
         if len(starts) != len(ends):
             raise UsageError(
                 f"got {len(starts)} --start-time and {len(ends)} --end-time; "
