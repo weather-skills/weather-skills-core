@@ -250,6 +250,21 @@ def test_visualization_pdf_official_mark_when_intact(tmp_path):
     assert ink not in PdfReader(path).pages[0].get_contents().get_data()
 
 
+def test_visualization_pdf_restamp_replaces_mark(tmp_path):
+    from pypdf import PdfReader
+
+    path = tmp_path / "restamp.pdf"
+    Image.new("RGB", (400, 300), color=(220, 220, 220)).save(path)
+    for _ in range(3):
+        provenance.stamp_figure(path, [entry()])
+    data = PdfReader(path).pages[0].get_contents().get_data()
+    assert data.count(b"/weather_skills_stamp BMC") == 1
+    # A broken chain removes the stamp but keeps the history.
+    provenance.stamp_figure(path, [{"skill": "", "version": "0", "args": {}, "input": None}])
+    assert b"weather_skills_stamp" not in PdfReader(path).pages[0].get_contents().get_data()
+    assert provenance.load_figure_history(path) is not None
+
+
 def test_visualization_svg_official_mark_when_intact(tmp_path):
     path = tmp_path / "marked.svg"
     path.write_text(
@@ -268,6 +283,17 @@ def test_visualization_svg_official_mark_when_intact(tmp_path):
     text = path.read_text(encoding="utf-8")
     assert "weather_skills_stamp" not in text
     assert provenance.load_figure_history(path) is not None
+
+
+def test_visualization_svg_official_mark_without_viewbox(tmp_path):
+    path = tmp_path / "plain.svg"
+    path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="400px" height="300">'
+        '<rect width="400" height="300"/></svg>',
+        encoding="utf-8",
+    )
+    provenance.stamp_figure(path, [entry()])
+    assert path.read_text(encoding="utf-8").count('id="weather_skills_stamp"') == 1
 
 
 def test_visualization_jpeg(tmp_path):

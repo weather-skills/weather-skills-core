@@ -30,6 +30,8 @@ _SVG_META_RE = re.compile(
     rf'<metadata\s+id=["\']{re.escape(HISTORY_ATTR)}["\']\s*>(.*?)</metadata>', re.DOTALL
 )
 _SVG_STAMP_RE = re.compile(r'<g\s+id="weather_skills_stamp".*?</g>', re.DOTALL)
+# The PDF stamp is a marked-content block, so a restamp can find and drop it.
+_PDF_STAMP_RE = re.compile(rb"/weather_skills_stamp BMC\b.*?\bEMC\s*", re.DOTALL)
 
 # The provenance stamp: a ring around a star, bottom-right, drawn on a figure
 # whose history chain is intact. One shape, drawn as pixels (PNG, JPEG, GIF
@@ -269,7 +271,14 @@ def zipped_zarr(path: Path):
 def _svg_official_mark(text: str, mark: bool) -> str:
     """Drop any stamp from SVG ``text``; when ``mark``, add one as the last element."""
     text = _SVG_STAMP_RE.sub("", text)
-    size = re.search(r'<svg\b[^>]*?viewBox="[-\d.]+ [-\d.]+ ([\d.]+) ([\d.]+)"', text)
+    root = re.search(r"<svg\b[^>]*>", text)
+    root = root[0] if root else ""
+    size = re.search(r'viewBox="[-\d.]+[ ,]+[-\d.]+[ ,]+([\d.]+)[ ,]+([\d.]+)"', root)
+    if size is None:
+        # No viewBox: user units are the pixel width and height.
+        width = re.search(r'\swidth="([\d.]+)(?:px)?"', root)
+        height = re.search(r'\sheight="([\d.]+)(?:px)?"', root)
+        size = (None, width[1], height[1]) if width and height else None
     shape = _stamp_shape(float(size[1]), float(size[2])) if mark and size else None
     if shape is None:
         return text
@@ -287,13 +296,21 @@ def _svg_official_mark(text: str, mark: bool) -> str:
     return text[:end] + stamp + text[end:]
 
 
-def _pdf_official_mark(page) -> None:
-    """Draw the stamp over a pypdf ``page`` (unchanged if too small)."""
+def _pdf_official_mark(page, mark: bool) -> None:
+    """Drop any stamp from a pypdf ``page``; when ``mark``, draw one over it."""
     from pypdf import PageObject
     from pypdf.generic import DecodedStreamObject, NameObject
 
+    contents = page.get_contents()
+    if contents is not None:
+        data = contents.get_data()
+        stripped = _PDF_STAMP_RE.sub(b"", data)
+        if stripped != data:
+            contents.set_data(stripped)
+            page.replace_contents(contents)
+
     box = page.mediabox
-    shape = _stamp_shape(float(box.width), float(box.height), px=0.75)
+    shape = _stamp_shape(float(box.width), float(box.height), px=0.75) if mark else None
     if shape is None:
         return
     cx, cy, r, stroke, star = shape
@@ -303,7 +320,7 @@ def _pdf_official_mark(page) -> None:
     k = 0.5523 * r
     ink = " ".join(f"{c / 255:.3f}" for c in _MARK_INK[:3])
     ops = [
-        f"q {ink} RG {ink} rg {stroke:.2f} w",
+        f"/weather_skills_stamp BMC q {ink} RG {ink} rg {stroke:.2f} w",
         f"{cx + r:.2f} {cy:.2f} m",
         f"{cx + r:.2f} {cy + k:.2f} {cx + k:.2f} {cy + r:.2f} {cx:.2f} {cy + r:.2f} c",
         f"{cx - k:.2f} {cy + r:.2f} {cx - r:.2f} {cy + k:.2f} {cx - r:.2f} {cy:.2f} c",
@@ -312,7 +329,7 @@ def _pdf_official_mark(page) -> None:
     ]
     for i, (x, y) in enumerate(star):
         ops.append(f"{x0 + x:.2f} {top - y:.2f} {'m' if i == 0 else 'l'}")
-    ops.append("h f Q")
+    ops.append("h f Q EMC")
     content = DecodedStreamObject()
     content.set_data("\n".join(ops).encode())
     overlay = PageObject.create_blank_page(width=box.width, height=box.height)
@@ -545,8 +562,7 @@ def stamp_figure(path: Path, history: list) -> None:
         writer = PdfWriter(clone_from=path)
         writer.pdf_header = PdfReader(path).pdf_header
         writer.add_metadata({f"/{HISTORY_ATTR}": payload})
-        if mark:
-            _pdf_official_mark(writer.pages[0])
+        _pdf_official_mark(writer.pages[0], mark)
         writer.write(path)
         return
 
