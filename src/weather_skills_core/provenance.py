@@ -18,13 +18,14 @@ from pathlib import Path
 
 HISTORY_ATTR = "weather_skills_history"
 SOURCE_ATTR = "weather_skills_source"
-# Rubber-stamp crimson (RGBA).
-_MARK_INK = (165, 15, 45, 235)
 
 _EXIF_USER_COMMENT = 0x9286  # EXIF UserComment tag
 _HTML_META_RE = re.compile(
     rf'<meta\s+name=["\']{re.escape(HISTORY_ATTR)}["\']\s+content=["\'](.*?)["\']\s*/?>',
     re.IGNORECASE | re.DOTALL,
+)
+_SVG_META_RE = re.compile(
+    rf'<metadata\s+id=["\']{re.escape(HISTORY_ATTR)}["\']\s*>(.*?)</metadata>', re.DOTALL
 )
 
 
@@ -32,6 +33,10 @@ def hash_zarr(zarr_path: Path) -> str:
     """Stable sha256 of a zarr directory's relative paths + file bytes."""
     zarr_path = Path(zarr_path)
     h = hashlib.sha256()
+    if zarr_path.is_file():
+        # A zipped Zarr: the archive's bytes stand for the store.
+        h.update(zarr_path.read_bytes())
+        return h.hexdigest()
     for p in sorted(zarr_path.rglob("*")):
         if p.is_file():
             h.update(str(p.relative_to(zarr_path)).encode())
@@ -159,76 +164,66 @@ def chain_is_intact(history) -> bool:
     return not violations
 
 
-def _render_circular_stamp(diameter: int):
-    """Build a small circular rubber stamp: ring, star, and a tiny ``w-s`` below it."""
+# The provenance stamp: a ring around a star, bottom-right, drawn on a figure
+# whose history chain is intact. One shape, drawn as pixels (PNG, JPEG, GIF
+# frames) or as vector shapes (SVG, PDF), in rubber-stamp crimson (RGBA).
+_MARK_INK = (165, 15, 45, 235)
+
+
+def _stamp_shape(width: float, height: float, px: float = 1.0):
+    """Ring and star of the stamp in the figure's own units, y down.
+
+    ``px`` is figure units per pixel (0.75 for PDF points). Returns
+    ``(cx, cy, ring_radius, stroke, star_points)``, or ``None`` when the
+    figure is under 96 px on its short side.
+    """
     import math
 
-    from PIL import Image, ImageDraw, ImageFont
-
-    scale = 4
-    size = max(diameter, 24) * scale
-    stamp = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(stamp)
-    cx = cy = size / 2
-    ink = _MARK_INK
-
-    outer_r = size / 2 - scale
-    draw.ellipse(
-        (cx - outer_r, cy - outer_r, cx + outer_r, cy + outer_r),
-        outline=ink,
-        width=max(scale, size // 40),
-    )
-
-    star_r = outer_r * 0.3
-    star_cy = cy - outer_r * 0.25
-    pts = []
+    w, h = width / px, height / px
+    if min(w, h) < 96:
+        return None
+    # About 3.5% of the short side, 24-28 px across.
+    diameter = max(24, min(int(min(w, h) * 0.035), 28))
+    margin = max(4, int(min(w, h) * 0.015))
+    outer_r = diameter / 2 - 1
+    stroke = max(2, diameter / 22)
+    cx, cy = w - margin - diameter / 2, h - margin - diameter / 2
+    star = []
     for i in range(10):
-        r = star_r if i % 2 == 0 else star_r * 0.38
-        a = -math.pi / 2 + i * math.pi / 5
-        pts.append((cx + r * math.cos(a), star_cy + r * math.sin(a)))
-    draw.polygon(pts, fill=ink)
-
-    # Serif lowercase; system serif fonts vary, so fall back to Pillow's sans.
-    font = ImageFont.load_default(size=outer_r * 0.7)
-    for name in ("Georgia.ttf", "Times New Roman.ttf", "DejaVuSerif.ttf"):
-        try:
-            font = ImageFont.truetype(name, size=outer_r * 0.7)
-            break
-        except OSError:
-            continue
-    draw.text((cx, cy + outer_r * 0.42), "w-s", fill=ink, font=font, anchor="mm")
-
-    # Slight rotation so it looks hand-inked rather than UI chrome.
-    stamp = stamp.rotate(-6, resample=Image.Resampling.BICUBIC, expand=True)
-    out_w = max(1, round(stamp.width / scale))
-    out_h = max(1, round(stamp.height / scale))
-    return stamp.resize((out_w, out_h), resample=Image.Resampling.LANCZOS)
+        r = outer_r * 0.48 if i % 2 == 0 else outer_r * 0.48 * 0.42
+        # Turned 6 degrees clockwise so it looks hand-inked rather than UI chrome.
+        a = -math.pi / 2 + i * math.pi / 5 + math.radians(6)
+        star.append(((cx + r * math.cos(a)) * px, (cy + r * math.sin(a)) * px))
+    return cx * px, cy * px, (outer_r - stroke / 2) * px, stroke * px, star
 
 
 def _draw_official_mark(img):
-    """Composite a circular ``weather-skills provenance verified`` rubber stamp onto ``img``.
+    """Return a copy of ``img`` with the stamp composited on (unchanged if too small)."""
+    from PIL import Image, ImageDraw
 
-    Placed bottom-right. No-ops (returns a copy) when the image is too small.
-    """
-    from PIL import Image
-
-    w, h = img.size
-    if min(w, h) < 96:
+    shape = _stamp_shape(*img.size)
+    if shape is None:
         return img.copy()
+    cx, cy, r, stroke, star = shape
 
-    # Compact seal; ~3.5% of the short side.
-    diameter = max(24, min(int(min(w, h) * 0.035), 28))
-    stamp = _render_circular_stamp(diameter)
-    margin = max(4, int(min(w, h) * 0.015))
-    if stamp.width + 2 * margin > w or stamp.height + 2 * margin > h:
-        return img.copy()
+    # Draw at 4x on a small tile around the stamp, then shrink it, for smooth edges.
+    scale = 4
+    x0, y0 = int(cx - r - stroke), int(cy - r - stroke)
+    size = int(2 * (r + stroke)) + 2
+    tile = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(tile)
+    tx, ty, outer = (cx - x0) * scale, (cy - y0) * scale, (r + stroke / 2) * scale
+    draw.ellipse(
+        (tx - outer, ty - outer, tx + outer, ty + outer),
+        outline=_MARK_INK,
+        width=round(stroke * scale),
+    )
+    draw.polygon([((x - x0) * scale, (y - y0) * scale) for x, y in star], fill=_MARK_INK)
+    tile = tile.resize((size, size), resample=Image.Resampling.LANCZOS)
 
     base = img.convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    x = w - margin - stamp.width
-    y = h - margin - stamp.height
-    overlay.paste(stamp, (x, y), stamp)
-
+    overlay.paste(tile, (x0, y0), tile)
     marked = Image.alpha_composite(base, overlay)
     if img.mode == "RGBA":
         return marked
@@ -238,13 +233,100 @@ def _draw_official_mark(img):
     return marked.convert("RGB")
 
 
+def zipped_zarr(path: Path):
+    """``(store, group)`` for a zipped Zarr: the store at the zip root, or in one top folder.
+
+    Zipping a ``name.zarr`` folder usually puts the store under ``name.zarr/``
+    inside the archive, so a root without Zarr metadata looks one level down.
+    """
+    import zipfile
+
+    import zarr
+
+    from weather_skills_core.errors import UsageError
+
+    markers = ("zarr.json", ".zgroup", ".zmetadata")
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+    if any(n in markers for n in names):
+        return zarr.storage.ZipStore(path, mode="r"), None
+    tops = sorted(
+        {n.split("/")[0] for n in names if n.count("/") == 1 and n.split("/")[1] in markers}
+    )
+    if len(tops) == 1:
+        return zarr.storage.ZipStore(path, mode="r"), tops[0]
+    found = ", ".join(tops) if tops else "none"
+    raise UsageError(
+        f"{path} is a zip but holds no single Zarr store at its root or one folder down "
+        f"(Zarr folders found: {found}); zip one .zarr folder, or upload NetCDF instead"
+    )
+
+
+_SVG_STAMP_RE = re.compile(r'<g\s+id="weather_skills_stamp".*?</g>', re.DOTALL)
+
+
+def _svg_official_mark(text: str, mark: bool) -> str:
+    """Drop any stamp from SVG ``text``; when ``mark``, add one as the last element."""
+    text = _SVG_STAMP_RE.sub("", text)
+    size = re.search(r'<svg\b[^>]*?viewBox="[-\d.]+ [-\d.]+ ([\d.]+) ([\d.]+)"', text)
+    shape = _stamp_shape(float(size[1]), float(size[2])) if mark and size else None
+    if shape is None:
+        return text
+    cx, cy, r, stroke, star = shape
+    ink = "rgb({}, {}, {})".format(*_MARK_INK[:3])
+    points = " ".join(f"{x:.2f},{y:.2f}" for x, y in star)
+    stamp = (
+        f'<g id="weather_skills_stamp" opacity="{_MARK_INK[3] / 255:.2f}">'
+        f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{r:.2f}" fill="none" '
+        f'stroke="{ink}" stroke-width="{stroke:.2f}"/>'
+        f'<polygon points="{points}" fill="{ink}"/></g>'
+    )
+    # Drawn last, so it sits on top of the figure.
+    end = text.rindex("</svg>")
+    return text[:end] + stamp + text[end:]
+
+
+def _pdf_official_mark(page) -> None:
+    """Draw the stamp over a pypdf ``page`` (unchanged if too small)."""
+    from pypdf import PageObject
+    from pypdf.generic import DecodedStreamObject, NameObject
+
+    box = page.mediabox
+    shape = _stamp_shape(float(box.width), float(box.height), px=0.75)
+    if shape is None:
+        return
+    cx, cy, r, stroke, star = shape
+    # Ring as four Bezier arcs and a filled star, in PDF's y-up page space.
+    x0, top = float(box.left), float(box.top)
+    cx, cy = x0 + cx, top - cy
+    k = 0.5523 * r
+    ink = " ".join(f"{c / 255:.3f}" for c in _MARK_INK[:3])
+    ops = [
+        f"q {ink} RG {ink} rg {stroke:.2f} w",
+        f"{cx + r:.2f} {cy:.2f} m",
+        f"{cx + r:.2f} {cy + k:.2f} {cx + k:.2f} {cy + r:.2f} {cx:.2f} {cy + r:.2f} c",
+        f"{cx - k:.2f} {cy + r:.2f} {cx - r:.2f} {cy + k:.2f} {cx - r:.2f} {cy:.2f} c",
+        f"{cx - r:.2f} {cy - k:.2f} {cx - k:.2f} {cy - r:.2f} {cx:.2f} {cy - r:.2f} c",
+        f"{cx + k:.2f} {cy - r:.2f} {cx + r:.2f} {cy - k:.2f} {cx + r:.2f} {cy:.2f} c S",
+    ]
+    for i, (x, y) in enumerate(star):
+        ops.append(f"{x0 + x:.2f} {top - y:.2f} {'m' if i == 0 else 'l'}")
+    ops.append("h f Q")
+    content = DecodedStreamObject()
+    content.set_data("\n".join(ops).encode())
+    overlay = PageObject.create_blank_page(width=box.width, height=box.height)
+    overlay[NameObject("/Contents")] = content
+    page.merge_page(overlay)
+
+
 def load_history(zarr_path: Path) -> list:
     """Read a zarr store's history chain; empty on miss or malformation."""
     zarr_path = Path(zarr_path)
     try:
         import xarray as xr
 
-        with xr.open_zarr(zarr_path, consolidated=False) as ds:
+        store, group = zipped_zarr(zarr_path) if zarr_path.is_file() else (zarr_path, None)
+        with xr.open_zarr(store, group=group, consolidated=False) as ds:
             raw = ds.attrs.get(HISTORY_ATTR)
     except (OSError, KeyError, ValueError):
         return []
@@ -376,11 +458,11 @@ def restamp_zarr(zarr_path: Path, history: list) -> None:
 
 
 def stamp_figure(path: Path, history: list) -> None:
-    """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, or HTML file.
+    """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, HTML, PDF, or SVG file.
 
-    When the chain is intact (non-empty and schema-valid), also draw a circular
-    old-school ``weather-skills provenance verified`` rubber stamp on PNG/JPEG
-    pixels and every GIF frame (bottom-right). HTML gets metadata only.
+    When the chain is intact (non-empty and schema-valid), also draw the
+    provenance stamp (a ring around a star, bottom-right) on PNG/JPEG pixels,
+    every GIF frame, and SVG and PDF as vector shapes. HTML gets metadata only.
     """
     from weather_skills_core.errors import SkillError
 
@@ -454,8 +536,32 @@ def stamp_figure(path: Path, history: list) -> None:
         path.write_text(text, encoding="utf-8")
         return
 
+    if suffix == ".pdf":
+        from pypdf import PdfReader, PdfWriter
+
+        # A custom key in the document info dictionary; viewers ignore it.
+        writer = PdfWriter(clone_from=path)
+        writer.pdf_header = PdfReader(path).pdf_header
+        writer.add_metadata({f"/{HISTORY_ATTR}": payload})
+        if mark:
+            _pdf_official_mark(writer.pages[0])
+        writer.write(path)
+        return
+
+    if suffix == ".svg":
+        text = path.read_text(encoding="utf-8")
+        meta = f'<metadata id="{HISTORY_ATTR}">{html.escape(payload, quote=False)}</metadata>'
+        if _SVG_META_RE.search(text):
+            text = _SVG_META_RE.sub(lambda m: meta, text, count=1)
+        else:
+            text = re.sub(r"(<svg\b[^>]*>)", lambda m: f"{m.group(1)}{meta}", text, count=1)
+        text = _svg_official_mark(text, mark)
+        path.write_text(text, encoding="utf-8")
+        return
+
     raise SkillError(
-        f"unsupported figure type {suffix!r} for {path}; expected .png, .jpg/.jpeg, .gif, or .html/.htm"
+        f"unsupported figure type {suffix!r} for {path}; expected .png, .jpg/.jpeg, .gif, "
+        ".html/.htm, .pdf, or .svg"
     )
 
 
@@ -498,5 +604,15 @@ def load_figure_history(path: Path) -> list | None:
         if not m:
             return None
         return coerce_chain(html.unescape(m.group(1)), path.name)
+
+    if suffix == ".pdf":
+        from pypdf import PdfReader
+
+        raw = (PdfReader(path).metadata or {}).get(f"/{HISTORY_ATTR}")
+        return coerce_chain(str(raw), path.name) if raw else None
+
+    if suffix == ".svg":
+        m = _SVG_META_RE.search(path.read_text(encoding="utf-8"))
+        return coerce_chain(html.unescape(m.group(1)), path.name) if m else None
 
     return None

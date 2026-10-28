@@ -21,6 +21,27 @@ def test_detect_spatial_dims_unidentifiable():
         dataset.detect_spatial_dims(ds)
 
 
+def test_detect_spatial_dims_prefers_grid_dims_over_cf_tagged_coords():
+    """Bare latitude/longitude dims beside a CF-tagged scalar or auxiliary coord."""
+    ds = make_gridded()
+    for name in ("latitude", "longitude"):
+        ds[name].attrs = {}
+    scalar = ds.assign_coords(lat=0.5, lon=36.0)
+    scalar["lat"].attrs["units"] = "degrees_north"
+    scalar["lon"].attrs["units"] = "degrees_east"
+    assert dataset.detect_spatial_dims(scalar) == ("latitude", "longitude")
+    aux = ds.assign_coords(lat=("latitude", ds["latitude"].values))
+    aux["lat"].attrs["standard_name"] = "latitude"
+    assert dataset.detect_spatial_dims(aux) == ("latitude", "longitude")
+
+
+def test_detect_spatial_dims_station_coords_still_found():
+    ds = make_station()
+    lat, lon = dataset.detect_spatial_dims(ds)
+    assert lat in ds.coords and lat not in ds.dims
+    assert lon in ds.coords and lon not in ds.dims
+
+
 def test_detect_spatial_dims_cf_attrs_resolve_nonstandard_names():
     ds = make_gridded().rename({"latitude": "yy", "longitude": "xx"})
     ds["yy"].attrs.update(standard_name="latitude", units="degrees_north")
