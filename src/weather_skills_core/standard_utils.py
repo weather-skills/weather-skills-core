@@ -119,24 +119,16 @@ def fill_missing_data_var_attrs(src, dst):
     return out
 
 
-_CREDENTIAL_HINT = (
-    "If your organization provides these credentials, check that you are working in the "
-    "organization that holds them; otherwise set them in the environment."
-)
-
-
 def require_env(*names: str, message: str | None = None) -> tuple:
     """Return the values of the named environment variables, in order.
 
     Unset or empty vars are missing; raises ``UsageError`` with ``message`` or a
-    default listing the missing names, followed by a hint to check the active
-    organization. Never print or log the values.
+    default listing the missing names. Never print or log the values.
     """
     values = [os.environ.get(name) for name in names]
     missing = [name for name, value in zip(names, values, strict=True) if not value]
     if missing:
-        text = message or f"missing required env var(s): {', '.join(missing)}."
-        raise UsageError(f"{text} {_CREDENTIAL_HINT}")
+        raise UsageError(message or f"missing required env var(s): {', '.join(missing)}")
     return tuple(values)
 
 
@@ -346,23 +338,12 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             )
     lon_vals = np.asarray(ds[lon_dim].values)
     lon_ascending = lon_vals.size == 1 or lon_vals[1] > lon_vals[0]
-    lat_vals = np.asarray(ds[lat_dim].values)
-    lat_mid = (north + south) / 2
-    lat_sub = ds.sel({lat_dim: lat_slice(lat_vals, north, south)})
-    # A box narrower than one cell can hold no cell centre; inside the grid,
-    # take the cell nearest the box's middle instead of selecting nothing.
-    if lat_sub.sizes[lat_dim] == 0 and lat_vals.min() <= lat_mid <= lat_vals.max():
-        lat_sub = ds.isel({lat_dim: [int(np.abs(lat_vals - lat_mid).argmin())]})
-    ds = lat_sub
+    ds = ds.sel({lat_dim: lat_slice(np.asarray(ds[lat_dim].values), north, south)})
 
     if west <= east:
         # Contiguous longitude span. Slice in the axis's own monotonic order.
         lon_sel = slice(west, east) if lon_ascending else slice(east, west)
-        lon_mid = (west + east) / 2
-        lon_sub = ds.sel({lon_dim: lon_sel})
-        if lon_sub.sizes[lon_dim] == 0 and lon_vals.min() <= lon_mid <= lon_vals.max():
-            lon_sub = ds.isel({lon_dim: [int(np.abs(lon_vals - lon_mid).argmin())]})
-        ds = lon_sub
+        ds = ds.sel({lon_dim: lon_sel})
     else:
         # Antimeridian crossing (west > east): the span runs west .. +180 and
         # -180 .. east. Select each wing with a label slice and concatenate

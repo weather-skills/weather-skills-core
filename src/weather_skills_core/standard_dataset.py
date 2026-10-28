@@ -241,22 +241,15 @@ def validate_input(ds, allowed, name: str) -> str:
 
 
 def detect_spatial_dims(ds) -> tuple:
-    """Find lat/lon dim names: CF metadata, then ALIASES.
-
-    Stations have no lat/lon dims, so CF can name their lat/lon coords. On a
-    grid, a dim wins over a CF-tagged scalar or auxiliary coord (a point label
-    next to bare ``latitude``/``longitude`` dims).
-    """
+    """Find lat/lon dim names: CF metadata, then ALIASES."""
     try:
         import cf_xarray  # noqa: F401 -- registers the .cf accessor
 
-        lat_dim, lon_dim = ds.cf["latitude"].name, ds.cf["longitude"].name
+        return ds.cf["latitude"].name, ds.cf["longitude"].name
     except KeyError:
-        lat_dim = lon_dim = None
-    if lat_dim not in ds.dims:
-        lat_dim = next((n for n in names_for("lat") if n in ds.dims), lat_dim)
-    if lon_dim not in ds.dims:
-        lon_dim = next((n for n in names_for("lon") if n in ds.dims), lon_dim)
+        pass
+    lat_dim = next((n for n in names_for("lat") if n in ds.dims), None)
+    lon_dim = next((n for n in names_for("lon") if n in ds.dims), None)
     if lat_dim is None or lon_dim is None:
         raise UsageError(
             f"could not identify lat/lon coords via CF metadata or name "

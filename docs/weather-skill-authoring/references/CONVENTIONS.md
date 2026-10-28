@@ -28,24 +28,14 @@ re-parse** in the skill body — no `bbox.split("/")`, no
 | Flag | CLI string | What the function receives |
 | --- | --- | --- |
 | `--bbox` | `N/W/S/E` decimal degrees | `(N, W, S, E)` floats |
-| `--date` | `YYYY-MM-DD` | `datetime.date`, or a list if `action="append"` |
-| `--start-time` | `YYYY-MM-DD` (inclusive) | `datetime.date`, or a list if `action="append"` |
-| `--end-time` | `YYYY-MM-DD` (inclusive) | `datetime.date`, or a list if `action="append"` |
+| `--date` | `YYYY-MM-DD` | `datetime.date` |
+| `--start-time` | `YYYY-MM-DD` (inclusive) | `datetime.date` |
+| `--end-time` | `YYYY-MM-DD` (inclusive) | `datetime.date` |
 | `--variable` / `-v` | catalog field name | string, or a list if `action="append"` |
 
 When both `--start-time` and `--end-time` are set, the decorator checks
 `start_time <= end_time`. Mutual exclusion of `--date` vs the range
 flags is skill-owned when you need it.
-
-Declare a date flag with `action="append"` to take several dates or
-windows in one call, e.g. January of every year. Repeated `--date` gives
-one date per flag. Repeated `--start-time` / `--end-time` pair up, the Nth
-start with the Nth end; the decorator exits 2 when the counts differ or a
-start is after its end.
-
-With several dates or windows, keep fetches to a minimum: fetch the data
-once, or once per source chunk such as a year's file, rather than once per
-window, then `.sel` each window out of what was fetched.
 
 ## Place and time are other skills
 

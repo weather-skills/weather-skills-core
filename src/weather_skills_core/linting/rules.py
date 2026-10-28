@@ -3,7 +3,7 @@
 Rule IDs are stable forever -- new rules take new numbers inside their band
 and existing rules are never renumbered. Bands group the rules by what they
 read: WSK0xx analysis failures, WSK1xx the declaration against the flags
-core owns, WSK3xx the SKILL.md manifest (drift, frontmatter), WSK4xx script packaging (version
+core owns, WSK3xx the SKILL.md manifest, WSK4xx script packaging (version
 constant, PEP 723). Skills are linted one at a time: two skills declaring
 the same flag differently is not a finding. (WSK2xx, the retired cross-skill
 rules, stays unused.)
@@ -18,8 +18,6 @@ advisory: findings never gate a run by themselves.
 import re
 from dataclasses import dataclass
 from pathlib import Path
-
-import yaml
 
 from weather_skills_core.linting.extract import SkillDeclaration, normalize_requirement_name
 from weather_skills_core.standard_args import StandardParameter, standard_parameters
@@ -38,7 +36,6 @@ RULES = {
     "WSK001": Rule("WSK001", "error", "skill script could not be analyzed"),
     "WSK101": Rule("WSK101", "warning", "argument redeclares a flag core owns"),
     "WSK301": Rule("WSK301", "warning", "SKILL.md drift"),
-    "WSK302": Rule("WSK302", "error", "SKILL.md frontmatter does not parse"),
     "WSK401": Rule("WSK401", "error", "_SKILL_VERSION missing or not passed to the decorator"),
     "WSK402": Rule("WSK402", "error", "PEP 723 block does not declare weather-skills-core"),
 }
@@ -305,43 +302,6 @@ def _rule_skill_md(decl: SkillDeclaration, siblings: list[SkillDeclaration]) -> 
     return findings
 
 
-def _rule_frontmatter(decl: SkillDeclaration) -> list[Finding]:
-    """WSK302: SKILL.md opens with YAML frontmatter holding a name and description.
-
-    Agent harnesses read a skill's ``name`` and ``description`` from this block;
-    when it does not parse (typically an unquoted description containing
-    ``: ``), the skill silently drops out of the catalog. A missing or
-    unreadable SKILL.md is WSK301's finding, not this rule's.
-    """
-    skill_md = decl.skill_dir / "SKILL.md"
-    try:
-        lines = skill_md.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return []
-    problem = None
-    if not lines or lines[0] != "---" or "---" not in lines[1:]:
-        problem = "SKILL.md does not open with a YAML frontmatter block between `---` lines"
-    else:
-        try:
-            data = yaml.safe_load("\n".join(lines[1 : lines.index("---", 1)]))
-        except yaml.YAMLError as exc:
-            detail = " ".join(str(exc).split())
-            problem = (
-                f"SKILL.md frontmatter is not valid YAML ({detail}); quote values that contain `: `"
-            )
-        else:
-            if not isinstance(data, dict):
-                problem = "SKILL.md frontmatter is not a YAML mapping"
-            else:
-                for key in ("name", "description"):
-                    if not isinstance(data.get(key), str) or not data[key].strip():
-                        problem = f"SKILL.md frontmatter `{key}` must be a non-empty string"
-                        break
-    if problem is None:
-        return []
-    return [_finding("WSK302", decl, None, f"{problem}.")]
-
-
 def lint_skills(decls: list[SkillDeclaration], active_rules: set[str]) -> list[Finding]:
     """Evaluate the active rules on each skill declaration, one skill at a time.
 
@@ -362,10 +322,6 @@ def lint_skills(decls: list[SkillDeclaration], active_rules: set[str]) -> list[F
             continue
         findings += _rule_shadow(decl)
         findings += _rule_skill_md(decl, siblings[decl.skill_dir.resolve()])
-        # One frontmatter check per skill, on the same script WSK301's reverse
-        # check uses, so a multi-script skill is not reported once per script.
-        if decl.key == min(s.key for s in siblings[decl.skill_dir.resolve()]):
-            findings += _rule_frontmatter(decl)
         findings += _rule_version(decl)
         findings += _rule_core_dep(decl)
     return [f for f in findings if f.rule in active_rules]
