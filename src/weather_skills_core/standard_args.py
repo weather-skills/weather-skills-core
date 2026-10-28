@@ -79,9 +79,10 @@ def convert_standard_args(args, arguments) -> dict:
     Only absolute values are parsed: a ``N/W/S/E`` bbox and ``YYYY-MM-DD``
     dates. Place names and relative dates are resolved before the call.
 
-    A skill that declares ``--start-time`` / ``--end-time`` with
-    ``action="append"`` gets lists of dates: the Nth start pairs with the Nth
-    end, one window each.
+    A skill that declares a date flag with ``action="append"`` gets a list of
+    dates. Repeated ``--date`` gives one date per flag. Repeated
+    ``--start-time`` / ``--end-time`` pair up: the Nth start with the Nth end,
+    one window each.
 
     Raises UsageError if a ``start_time`` is after its ``end_time``, or the
     repeated starts and ends do not pair up.

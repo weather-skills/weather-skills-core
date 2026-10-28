@@ -325,6 +325,21 @@ def test_run_loop_date_parsed(tmp_path):
     assert load_history(out)[-1]["args"]["date"] == "2026-01-15"
 
 
+def test_run_loop_repeated_date_parsed(tmp_path):
+    out = tmp_path / "out.zarr"
+    seen = {}
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--date", action="append")
+    def skill(output, date, **kwargs):
+        seen["dates"] = [d.isoformat() for d in date]
+        return make_gridded()
+
+    skill(["-o", str(out), "--date", "2024-01-15", "--date", "2025-01-15"])
+    assert seen["dates"] == ["2024-01-15", "2025-01-15"]
+    assert load_history(out)[-1]["args"]["date"] == ["2024-01-15", "2025-01-15"]
+
+
 def test_run_loop_two_inputs(tmp_path):
     a = tmp_path / "a.zarr"
     b = tmp_path / "b.zarr"
