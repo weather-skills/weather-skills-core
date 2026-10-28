@@ -405,16 +405,23 @@ def weather_skill(
                 output_paths: list[Path] = []
                 if output:
                     output_paths = [Path(p) for p in (args.output or [])]
-                    # Fail before the skill runs, not after a long fetch.
+                    # Check every --output now, before the skill runs. A bad path
+                    # would otherwise only fail at write time, after a fetch that
+                    # can take minutes, and the work would be lost.
                     for path in output_paths:
+                        # A file somewhere above the output (e.g. -o rain.zip/out.zarr)
+                        # means its folder can never be created, so to_zarr would fail.
                         blocker = next((p for p in path.parents if p.is_file()), None)
                         if blocker is not None:
                             raise UsageError(
                                 f"--output {path} is inside {blocker}, which is a file, "
                                 "not a folder; pass a path under a folder"
                             )
-                        # The skill replaces --output, so never let it overwrite
-                        # something a weather skill did not write.
+                        # Writing replaces whatever is at --output (write_output
+                        # deletes it first). A mistyped -o could name the user's own
+                        # folder or file, so only replace what is safe to lose: an
+                        # empty folder or an earlier skill output, which carries
+                        # weather_skills_history. See can_replace_output.
                         if not provenance_mod.can_replace_output(path):
                             raise UsageError(
                                 f"--output {path} already exists and was not written by a "
