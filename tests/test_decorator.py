@@ -266,6 +266,50 @@ def test_run_loop_start_after_end_exits(tmp_path):
     assert exc.value.code == 2
 
 
+def test_run_loop_repeated_time_windows_pair_up(tmp_path):
+    from datetime import date
+
+    out = tmp_path / "out.zarr"
+    seen = {}
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--start-time", action="append")
+    @weather_skill.argument("--end-time", action="append")
+    def skill(output, start_time, end_time, **kwargs):
+        seen["windows"] = list(zip(start_time, end_time, strict=True))
+        return make_gridded()
+
+    argv = ["-o", str(out), "--start-time", "2024-01-01", "--end-time", "2024-01-31"]
+    skill([*argv, "--start-time", "2025-01-01", "--end-time", "2025-01-31"])
+    assert seen["windows"] == [
+        (date(2024, 1, 1), date(2024, 1, 31)),
+        (date(2025, 1, 1), date(2025, 1, 31)),
+    ]
+    entry = load_history(out)[-1]["args"]
+    assert entry["start_time"] == ["2024-01-01", "2025-01-01"]
+    assert entry["end_time"] == ["2024-01-31", "2025-01-31"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--start-time", "2025-01-01"],
+        ["--start-time", "2025-02-01", "--end-time", "2025-01-01"],
+    ],
+)
+def test_run_loop_repeated_time_windows_unpaired_or_reversed_exit(tmp_path, extra):
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("--start-time", action="append")
+    @weather_skill.argument("--end-time", action="append")
+    def skill(output, start_time, end_time, **kwargs):
+        return make_gridded()
+
+    argv = ["-o", str(tmp_path / "out.zarr"), "--start-time", "2024-01-01"]
+    with pytest.raises(SystemExit) as exc:
+        skill([*argv, "--end-time", "2024-01-31", *extra])
+    assert exc.value.code == 2
+
+
 def test_run_loop_date_parsed(tmp_path):
     out = tmp_path / "out.zarr"
     seen = {}
