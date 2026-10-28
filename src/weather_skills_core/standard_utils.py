@@ -670,9 +670,9 @@ def roll_and_agg(
     if stride is not None and not isinstance(stride, int) and np.issubdtype(dtype, np.timedelta64):
         raise UsageError("string --stride requires a datetime64 time axis")
 
-    # Split a datetime axis into runs at gaps (a step over 1.5x the median) and
-    # at steps backwards, e.g. between stacked Januaries. Windows and strides
-    # stay inside a run. Lead (step) axes change spacing on purpose; not split.
+    # Check for gaps over 1.5x the median spacing between points, or steps
+    # backwards. These could be true gaps in the data that should not be
+    # rolled through, so each run between them is rolled on its own.
     values = ds[dim].values
     cuts = []
     if np.issubdtype(dtype, np.datetime64) and values.size > 2:
