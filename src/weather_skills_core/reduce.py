@@ -7,6 +7,7 @@ import numpy as np
 import xarray as xr
 
 from weather_skills_core.errors import DataError, UsageError
+from weather_skills_core.standard_dataset import names_for
 from weather_skills_core.standard_utils import TIME_LABELS, calendar_expected_steps
 from weather_skills_core.units import (
     AGGREGATION_COVERAGE_COORD,
@@ -17,6 +18,8 @@ from weather_skills_core.units import (
 )
 
 METHODS = ("mean", "std", "min", "max", "sum", "median", "quantile")
+# Grid and station dims a sum must not add up (latitude, lon, station_id, ...).
+_SPATIAL_DIMS = frozenset((*names_for("lat"), *names_for("lon"), *names_for("point_id")))
 
 
 def summarize(
@@ -44,7 +47,10 @@ def summarize(
     - ``quantile``: the ``q`` quantiles (linear interpolation, as ``numpy.quantile``),
       along a new ``quantile`` dim holding the ``q`` values. Not weighted.
     - ``sum``: the total, NaN (not 0) if every value is NaN. Refused for rates over
-      ``time`` or ``step`` (``mm day-1``) and for offset units (``degree_Celsius``).
+      ``time`` or ``step`` (``mm day-1``), for offset units (``degree_Celsius``), and
+      over grid cells or stations (``latitude``, ``longitude``, ``point_id``, directly or
+      through a spatial ``by`` label) unless the variable is dimensionless (units ``1``,
+      such as 0/1 flags, which sum to a count).
 
     Args:
         ds: Quantified Dataset, as ``@weather_skill`` passes inputs.
@@ -65,6 +71,8 @@ def summarize(
             (grid cell, station, member) with data for less than this share of the
             group's full calendar period (all 92 days of a MAM) is left out before cells
             are pooled. Missing steps are never filled. Default 1.0: complete groups only.
+            A repeated time step is refused, as is a step longer than a day that runs into
+            the next group (a week from 27 May under ``MAM``).
 
     Returns:
         Quantified Dataset. Collapsed dims are gone and each ``by`` label is a dim (after
@@ -77,8 +85,10 @@ def summarize(
         UsageError: an unknown dim, label, variable or method; labels that share some but
             not all dims; weights with a method other than mean; ``q`` missing, out of
             [0, 1], or given without ``method="quantile"``; a refused sum; a time
-            label whose calendar period cannot be counted.
-        DataError: a label whose every value is ``""``.
+            label whose calendar period cannot be counted; a repeated time step or a step
+            running into the next group (with a ``by`` time label).
+        DataError: a label whose every value is ``""``; labels on the same dims that
+            never meet (no cell has a non-empty value of each).
     """
     if method not in METHODS:
         raise UsageError(f"method {method!r} is not one of {', '.join(METHODS)}")
@@ -162,6 +172,11 @@ def summarize(
                     "expected": None,  # time steps of a complete group, set below
                 }
             )
+        if not entries:
+            raise DataError(
+                f"by {', '.join(names)}: no cell or step has a non-empty value of every one "
+                "of these labels at once; nothing to group"
+            )
         groups.append(entries)
 
     # Coverage: the steps a complete group holds, from the calendar of the time labels.
@@ -211,6 +226,18 @@ def summarize(
                     f"({da.attrs.get('units', units)}) into a rate, not a total; convert the "
                     "rates to period totals first (convert-to-totals)"
                 )
+        # Adding up cells or stations of a physical quantity (mm, degC) grows with the
+        # area and means nothing; dimensionless counts and flags add up to how many.
+        over_space = [d for d in rdims if d in _SPATIAL_DIMS]
+        if method == "sum" and over_space and (units is None or units.dimensionality):
+            spatial_by = [b for b in by if set(ds[b].dims) & set(over_space)]
+            via = f" (via by {', '.join(spatial_by)})" if spatial_by else ""
+            raise UsageError(
+                f"sum over {', '.join(over_space)}{via} would add up {var!r} "
+                f"({'no units' if units is None else format(units, '~')}) across cells or "
+                "stations; use method mean for a regional value, after summing over time in "
+                "a separate call. Only dimensionless variables (units 1) sum over space"
+            )
         # Offset units (degC) differ from their deltas: a spread of degC is a delta_degC,
         # and a sum of degC means nothing.
         delta = None if units is None else (1 * units - 1 * units).units

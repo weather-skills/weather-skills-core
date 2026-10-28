@@ -592,8 +592,10 @@ def calendar_expected_steps(times, period, labels, month_groups=()):
         Dict from a tuple of label values (in ``labels`` order) to its expected steps.
 
     Raises:
-        UsageError: times off a regular ``period`` axis; labels that are not the calendar
-            labels of their times; a group lasting over a year.
+        UsageError: a repeated time; times off a regular ``period`` axis; labels that are
+            not the calendar labels of their times; a step longer than a day that runs
+            into the next group (a week from 27 May under ``MAM``); a group lasting over a
+            year.
     """
     import datetime
     import re
@@ -605,6 +607,11 @@ def calendar_expected_steps(times, period, labels, month_groups=()):
 
     from weather_skills_core.units import parse_aggregation_period
 
+    if not times.is_unique:
+        raise UsageError(
+            f"time {times[times.duplicated()][0]} appears more than once, so its values "
+            "would count twice toward a time group; drop the repeated steps first"
+        )
     # Rebuild the labels on a gap-free axis at the data's step, reaching a year past
     # both ends, so every calendar run the data touch is whole.
     first = times[0]
@@ -625,12 +632,14 @@ def calendar_expected_steps(times, period, labels, month_groups=()):
             if k % every == 0
             for day in ((1,) if calendar else (1, 11, 21))
         ]
+        longer_than_a_day = True
     else:
         step = parse_aggregation_period(period)
         step = datetime.timedelta(seconds=float(step.to("second").magnitude))
         margin = int(np.ceil(datetime.timedelta(days=366) / step))
         n = round((times[-1] - first) / step)
         full = [first + i * step for i in range(-margin, n + margin + 1)]
+        longer_than_a_day = step > datetime.timedelta(days=1)
     full = pd.DatetimeIndex(full) if isinstance(times, pd.DatetimeIndex) else xr.CFTimeIndex(full)
     at = full.get_indexer(times)
     if (at < 0).any():
@@ -639,6 +648,9 @@ def calendar_expected_steps(times, period, labels, month_groups=()):
             "each time group should hold cannot be counted"
         )
     rebuilt = calendar_labels(full, month_groups)
+    # Labels at each step's last second, to catch a step (a week from 27 May) that runs
+    # into the next group. A step of a day or less belongs to the day it is stamped on.
+    rebuilt_end = calendar_labels(full[1:] - datetime.timedelta(seconds=1), month_groups)
     change = np.zeros(full.size, dtype=bool)
     grouped = np.ones(full.size, dtype=bool)
     for name, values in labels.items():
@@ -646,6 +658,14 @@ def calendar_expected_steps(times, period, labels, month_groups=()):
             raise UsageError(
                 f"{name!r} does not hold the calendar {name} of each time step, as "
                 "calendar_labels builds it, so its full calendar period is unknown"
+            )
+        crossing = rebuilt[name][at] != rebuilt_end[name][at]
+        if longer_than_a_day and crossing.any():
+            raise UsageError(
+                f"the {period} step starting {times[np.argmax(crossing)]} runs into the next "
+                f"{name} group, so the group would take in time outside it; aggregate to "
+                "steps that fit inside the groups (daily, or monthly for months and month "
+                "groups)"
             )
         change[1:] |= rebuilt[name][1:] != rebuilt[name][:-1]
         if name == "month_group":

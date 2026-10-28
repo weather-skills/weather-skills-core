@@ -20,10 +20,21 @@ def test_mean_collapses_time():
     assert out["precip"].values == pytest.approx(2.0)
 
 
-def test_sum_collapses_longitude():
-    out = run(make_gridded(), dims=["longitude"], method="sum")
+def test_sum_of_dimensionless_flags_collapses_longitude():
+    ds = make_gridded(name="wet")
+    ds["wet"].attrs.update(units="1", standard_name="")
+    out = run(ds, dims=["longitude"], method="sum")
     assert "longitude" not in out.dims
-    assert out["precip"].sizes["latitude"] == 3
+    assert out["wet"].sizes["latitude"] == 3
+    assert (out["wet"].values == 4.0).all()  # four wet cells per row
+
+
+@pytest.mark.parametrize("dims", [["latitude", "longitude"], ["longitude"]])
+def test_sum_over_space_of_physical_units_is_refused(dims):
+    ds = make_gridded()
+    ds["precip"].attrs.update(units="mm", standard_name="", cell_methods="time: sum")
+    with pytest.raises(UsageError, match="use method mean"):
+        run(ds, dims=dims, method="sum")
 
 
 def _celsius(lats=(0.0, 60.0), lons=(10.0, 11.0)):
@@ -123,10 +134,22 @@ def test_by_two_labels_with_extra_dim():
     ds = _labeled().drop_vars("half")
     ds = ds.assign_coords(dayofyear=("time", ds["time"].dt.dayofyear.values))
     ds["precip"].attrs.update(units="mm", cell_methods="time: sum")
-    out = run(ds, by=["region", "dayofyear"], method="sum")
+    out = run(ds, by=["region", "dayofyear"], method="mean")
     assert set(out["precip"].dims) == {"region", "dayofyear"}
-    # region a, day 2: cells 0, 1 at time 1 -> 6 + 7
-    assert out["precip"].sel(region="a", dayofyear=2).item() == 13.0
+    # region a, day 2: cells 0, 1 at time 1 -> mean of 6 and 7
+    assert out["precip"].sel(region="a", dayofyear=2).item() == 6.5
+
+
+def test_sum_by_spatial_label_is_refused():
+    ds = _labeled().drop_vars("half")
+    ds["precip"].attrs.update(units="mm", cell_methods="time: sum")
+    with pytest.raises(UsageError, match=r"\(via by region\)"):
+        run(ds, by=["region"], method="sum")
+
+
+def test_sum_over_stations_is_refused():
+    with pytest.raises(UsageError, match="sum over point_id would add up"):
+        run(_seasons(), dims=["point_id"], method="sum")
 
 
 def test_by_rejects_dim_coord():
@@ -158,6 +181,13 @@ def test_by_same_dims_combination_without_cells_is_nan():
     assert r.sel(region="b", zone="w").item() == 4.0
 
 
+def test_by_labels_that_never_meet_is_an_error():
+    zone = np.array([["", "", "w"], ["", "", ""]])  # only on the cell outside every region
+    ds = _labeled().assign_coords(zone=(("latitude", "longitude"), zone))
+    with pytest.raises(DataError, match="nothing to group"):
+        run(ds, by=["region", "zone"])
+
+
 def _seasons(n_time=275, start="2020-04-01"):
     """Two stations of daily totals with year and MAM / OND labels; S1 misses 10 OND days."""
     ds = make_point_obs(n_time=n_time, start=start, fill=1.0)
@@ -185,12 +215,12 @@ def test_by_season_blanks_incomplete_groups(capsys):
     assert out["elevation"].values.tolist() == [10.0, 20.0]
 
 
-def test_coverage_is_per_station_before_a_regional_sum(capsys):
+def test_coverage_is_per_station_before_a_regional_mean(capsys):
     """Two stations missing different days are never pooled into a complete OND."""
     ds = _seasons()
     month = ds["time"].dt.month.values
     ds["precip"].values[0, np.nonzero(month == 12)[0][:5]] = np.nan  # S0 misses Dec days
-    out = run(ds, dims=["point_id"], by=["year", "month_group"], method="sum")
+    out = run(ds, dims=["point_id"], by=["year", "month_group"], method="mean")
     assert np.isnan(out["precip"].sel(year=2020, month_group="OND").item())
     assert "left out" in capsys.readouterr().err
 
@@ -206,6 +236,44 @@ def test_min_coverage_keeps_partial_sums_with_warning(capsys):
     assert coverage.sel(point_id="S1", month_group="OND").item() == pytest.approx(82 / 92)
     assert coverage.sel(point_id="S0", month_group="OND").item() == 1.0
     assert out["precip"].attrs["ancillary_variables"] == "precip_coverage"
+
+
+def test_repeated_time_step_is_refused():
+    """A repeated day would count twice and pass as a complete season."""
+    ds = _seasons()
+    ds = xr.concat([ds, ds.isel(time=[200])], "time")
+    with pytest.raises(UsageError, match="appears more than once"):
+        run(ds, by=["year", "month_group"], method="sum")
+
+
+def _weekly(start):
+    """Weekly mm totals at one station for 2020, labelled with year and MAM / OND."""
+    ds = make_point_obs(n_time=1, n_points=1)
+    times = xr.date_range(start, "2020-12-31", freq="7D")
+    month = times.month
+    group = np.where(month.isin([3, 4, 5]), "MAM", np.where(month >= 10, "OND", ""))
+    ds = xr.Dataset(
+        {"precip": (("point_id", "time"), np.ones((1, times.size)))},
+        coords={"point_id": ds["point_id"].values, "time": times},
+    )
+    ds["precip"].attrs.update(units="mm", aggregation_period="7 day")
+    return ds.assign_coords(year=("time", times.year), month_group=("time", group))
+
+
+def test_weekly_steps_crossing_a_season_are_refused():
+    """A week from 27 May takes in June days, so its MAM total would not be MAM's."""
+    with pytest.raises(UsageError, match="7 day step starting .* runs into the next"):
+        run(_weekly("2020-01-01"), by=["year", "month_group"], method="sum")
+
+
+def test_daily_steps_stamped_at_noon_are_kept():
+    """A daily step belongs to the day it is stamped on, whatever the hour."""
+    import pandas as pd
+
+    ds = _seasons()
+    ds = ds.assign_coords(time=ds.indexes["time"] + pd.Timedelta("12h"))
+    precip = run(ds, by=["year", "month_group"], method="sum")["precip"]
+    assert precip.sel(point_id="S0", year=2020, month_group="OND").item() == 92.0
 
 
 def test_season_crossing_december_takes_its_start_year():
@@ -249,7 +317,7 @@ def test_std_of_celsius_is_a_delta():
 
 def test_sum_of_celsius_is_refused():
     with pytest.raises(UsageError, match="convert to kelvin first"):
-        run(_celsius(), dims=["latitude"], method="sum")
+        run(_celsius(), dims=["time"], method="sum")
 
 
 def test_float32_weighted_mean_keeps_float64_precision():
@@ -281,7 +349,8 @@ def test_matches_brute_force_groups(seed, method):
     rng = np.random.default_rng(seed)
     lats = np.sort(rng.choice(np.arange(-70.0, 71.0, 10.0), 4, replace=False))
     ds = make_gridded(n_time=365, start="2021-01-01", lats=lats, lons=(30.0, 31.0, 32.0))
-    ds["precip"].attrs["units"] = "mm"
+    # A sum over cells is refused for physical units, so sum dimensionless values.
+    ds["precip"].attrs["units"] = "1" if method == "sum" else "mm"
     data = rng.gamma(2.0, 3.0, ds["precip"].shape)
     data[rng.random(data.shape) < rng.choice([0.0, 0.05, 0.3])] = np.nan
     ds["precip"].values[:] = data
