@@ -619,8 +619,10 @@ def roll_and_agg(
     ``align`` is left/right/center label placement. ``stride`` is an int step,
     or a ``stride_dates`` string when ``dim`` is datetime64.
     Methods: ``mean``, ``min``, ``max`` only (rates-first).
+    A datetime axis is split at gaps; windows and strides stay inside each run.
     """
     import numpy as np
+    import xarray as xr
 
     from weather_skills_core import units  # noqa: F401  (registers the .pint accessor)
 
@@ -635,33 +637,49 @@ def roll_and_agg(
         raise UsageError(
             f"rolling aggregation requires datetime64 or timedelta64 on {dim!r}; got dtype {dtype}"
         )
-    # Roll on plain numbers: pint refuses the window sum behind a mean for an
-    # offset unit (degree_Celsius), though mean/min/max of one are well defined.
-    quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
-    plain = ds.pint.dequantify() if quantified else ds
-    rolled = plain.rolling({dim: window}, min_periods=min_periods, center=False)
-    fn = {"mean": rolled.mean, "max": rolled.max, "min": rolled.min}.get(method)
-    if fn is None:
+    if method not in ("mean", "max", "min"):
         raise UsageError(f"unsupported rolling method {method!r}; use mean|min|max")
-    out = fn(skipna=True, keep_attrs=True)
-    out = out.pint.quantify() if quantified else out
-    out = out.isel({dim: slice(window - 1, None)})
     step_by_align = {"center": (window - 1) // 2, "right": 0, "left": window - 1}
     if align not in step_by_align:
         raise UsageError(f"align must be left/right/center; got {align!r}")
     step_shift = step_by_align[align]
-    # Label each window with the original coordinate of its left/center/right
-    # sample, so uneven or sub-daily spacing is labelled exactly.
-    start = window - 1 - step_shift
-    labels = ds[dim].values[start : start + out.sizes[dim]]
-    out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
-    if stride is None:
-        return out
-    if isinstance(stride, int):
-        if stride < 1:
-            raise UsageError(f"stride must be >= 1; got {stride}")
-        return out.isel({dim: slice(None, None, stride)})
-    if not np.issubdtype(out[dim].dtype, np.datetime64):
+    if isinstance(stride, int) and stride < 1:
+        raise UsageError(f"stride must be >= 1; got {stride}")
+    if stride is not None and not isinstance(stride, int) and np.issubdtype(dtype, np.timedelta64):
         raise UsageError("string --stride requires a datetime64 time axis")
-    times = stride_dates(out[dim].values[0], out[dim].values[-1], stride=str(stride))
-    return out.sel({dim: times})
+
+    # Split a time axis at its gaps (any spacing over 1.5x the median): stacked
+    # windows such as each January, or a missing day. Each run is rolled and
+    # strided on its own, so a window never bridges a gap and a stride restarts
+    # at each run. Lead (step) axes change spacing on purpose (3 h then 6 h), so
+    # they are rolled whole.
+    values = ds[dim].values
+    cuts = []
+    if np.issubdtype(dtype, np.datetime64) and values.size > 2:
+        diffs = np.diff(values).astype("int64")
+        cuts = np.nonzero(diffs > 1.5 * np.median(diffs))[0] + 1
+    runs = np.split(np.arange(values.size), cuts)
+
+    # Roll on plain numbers: pint refuses the window sum behind a mean for an
+    # offset unit (degree_Celsius), though mean/min/max of one are well defined.
+    quantified = any(getattr(ds[v].pint, "units", None) is not None for v in ds.data_vars)
+    plain = ds.pint.dequantify() if quantified else ds
+    pieces = []
+    for run in runs:
+        part = plain.isel({dim: run})
+        rolled = part.rolling({dim: window}, min_periods=min_periods, center=False)
+        out = getattr(rolled, method)(skipna=True, keep_attrs=True)
+        out = out.isel({dim: slice(window - 1, None)})
+        # Label each window with the original coordinate of its left/center/right
+        # sample, so uneven or sub-daily spacing is labelled exactly.
+        start = window - 1 - step_shift
+        labels = part[dim].values[start : start + out.sizes[dim]]
+        out = out.assign_coords({dim: (dim, labels, ds[dim].attrs)})
+        if isinstance(stride, int):
+            out = out.isel({dim: slice(None, None, stride)})
+        elif stride is not None and out.sizes[dim] > 0:
+            times = stride_dates(out[dim].values[0], out[dim].values[-1], stride=str(stride))
+            out = out.sel({dim: times})
+        pieces.append(out)
+    out = xr.concat(pieces, dim=dim) if len(pieces) > 1 else pieces[0]
+    return out.pint.quantify() if quantified else out
