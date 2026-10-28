@@ -338,12 +338,23 @@ def bbox_subset(ds, bbox, *, lat_dim: str | None = None, lon_dim: str | None = N
             )
     lon_vals = np.asarray(ds[lon_dim].values)
     lon_ascending = lon_vals.size == 1 or lon_vals[1] > lon_vals[0]
-    ds = ds.sel({lat_dim: lat_slice(np.asarray(ds[lat_dim].values), north, south)})
+    lat_vals = np.asarray(ds[lat_dim].values)
+    lat_mid = (north + south) / 2
+    lat_sub = ds.sel({lat_dim: lat_slice(lat_vals, north, south)})
+    # A box narrower than one cell can hold no cell centre; inside the grid,
+    # take the cell nearest the box's middle instead of selecting nothing.
+    if lat_sub.sizes[lat_dim] == 0 and lat_vals.min() <= lat_mid <= lat_vals.max():
+        lat_sub = ds.isel({lat_dim: [int(np.abs(lat_vals - lat_mid).argmin())]})
+    ds = lat_sub
 
     if west <= east:
         # Contiguous longitude span. Slice in the axis's own monotonic order.
         lon_sel = slice(west, east) if lon_ascending else slice(east, west)
-        ds = ds.sel({lon_dim: lon_sel})
+        lon_mid = (west + east) / 2
+        lon_sub = ds.sel({lon_dim: lon_sel})
+        if lon_sub.sizes[lon_dim] == 0 and lon_vals.min() <= lon_mid <= lon_vals.max():
+            lon_sub = ds.isel({lon_dim: [int(np.abs(lon_vals - lon_mid).argmin())]})
+        ds = lon_sub
     else:
         # Antimeridian crossing (west > east): the span runs west .. +180 and
         # -180 .. east. Select each wing with a label slice and concatenate
