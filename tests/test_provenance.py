@@ -322,12 +322,13 @@ def test_visualization_gif_keeps_frames_and_timing(tmp_path):
             assert len(corner) > 1
 
 
-def test_visualization_gif_frames_share_one_palette(tmp_path):
+def test_visualization_gif_stamp_changes_only_the_mark(tmp_path):
     import numpy as np
+    from PIL import ImageChops
 
     path = tmp_path / "x.gif"
-    # The same 200-colour ramp (a colorbar) beside 50 colours of each frame's own:
-    # each frame fits in 256 colours, but with the seal added it no longer does.
+    # A 200-colour ramp (a colorbar) beside 50 colours of each frame's own: nearly
+    # the whole palette, so re-picking it would recolour the ramp.
     ramp = np.repeat(np.arange(200, dtype=np.uint8), 2)[:, None]
     frames = []
     for f in range(3):
@@ -337,16 +338,20 @@ def test_visualization_gif_frames_share_one_palette(tmp_path):
         rgb[:, 100:200] = np.stack([own + 60 * f, own, 255 - own], -1)
         frames.append(Image.fromarray(rgb))
     frames[0].save(path, save_all=True, append_images=frames[1:], duration=300, loop=0)
-    provenance.stamp_figure(path, [entry()])
     with Image.open(path) as img:
-        ramps, colours = [], set()
+        frames = []
         for i in range(img.n_frames):
             img.seek(i)
-            rgb = img.convert("RGB")
-            ramps.append(rgb.crop((0, 0, 100, 400)).tobytes())
-            colours |= {c for _, c in rgb.getcolors(1 << 24)}
-    assert len(colours) <= 256
-    assert len(set(ramps)) == 1
+            frames.append(img.convert("RGB"))
+    provenance.stamp_figure(path, [entry()])
+    cx, cy, r, stroke, _ = provenance._stamp_shape(300, 400)
+    with Image.open(path) as img:
+        for i, before in enumerate(frames):
+            img.seek(i)
+            x0, y0, x1, y1 = ImageChops.difference(before, img.convert("RGB")).getbbox()
+            # Only pixels under the mark changed.
+            assert cx - r - stroke - 1 <= x0 and x1 <= cx + r + stroke + 2
+            assert cy - r - stroke - 1 <= y0 and y1 <= cy + r + stroke + 2
 
 
 def test_visualization_png_official_mark_when_intact(tmp_path):

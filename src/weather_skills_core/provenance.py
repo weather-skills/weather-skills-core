@@ -519,6 +519,7 @@ def stamp_figure(path: Path, history: list) -> None:
         return
 
     if suffix == ".gif":
+        import numpy as np
         from PIL import Image, ImageSequence
 
         # The history goes in the GIF comment block; each frame keeps its duration.
@@ -527,17 +528,24 @@ def stamp_figure(path: Path, history: list) -> None:
             for frame in ImageSequence.Iterator(img):
                 durations.append(frame.info.get("duration", 0))
                 rgb = frame.convert("RGB")
-                frames.append(_draw_official_mark(rgb) if mark else rgb)
+                marked = _draw_official_mark(rgb) if mark else rgb
+                # Saving RGB would let Pillow pick a new 256-colour palette and recolour
+                # the whole frame. Keep the frame's own colours, so every pixel off the
+                # mark stays as it was; the mark gets the free palette slots, and
+                # otherwise the nearest colour the frame has.
+                colours = [c for _, c in rgb.getcolors(256)]
+                ink = sorted(marked.getcolors(1 << 16), reverse=True)
+                colours += [c for _, c in ink if c not in colours][: 256 - len(colours)]
+                # Pillow's quantize(palette=...) matches colours only roughly and merges
+                # close shades, so look each pixel's colour up exactly here.
+                palette = np.array(colours, dtype=np.int32)
+                pixels = np.asarray(marked, dtype=np.int32)
+                seen, where = np.unique(pixels.reshape(-1, 3), axis=0, return_inverse=True)
+                nearest = ((seen[:, None] - palette[None]) ** 2).sum(-1).argmin(1)
+                out = Image.fromarray(nearest[where].reshape(pixels.shape[:2]).astype(np.uint8))
+                out.putpalette(palette.astype(np.uint8).ravel().tolist())
+                frames.append(out)
             loop = img.info.get("loop", 0)
-        # A GIF frame holds 256 colours. Left to Pillow, each frame gets its own palette
-        # and the same colours (a colorbar) band differently from frame to frame. Pick
-        # one palette from all frames stacked together and map every frame onto it.
-        w, h = frames[0].size
-        stack = Image.new("RGB", (w, h * len(frames)))
-        for i, frame in enumerate(frames):
-            stack.paste(frame, (0, h * i))
-        palette = stack.quantize(256, dither=Image.Dither.NONE)
-        frames = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
         frames[0].save(
             path,
             save_all=True,
