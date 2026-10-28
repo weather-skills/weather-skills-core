@@ -173,6 +173,16 @@ def write_output(value, out_path, history, first_ds):
         raise UsageError(
             f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
         )
+    # Replace an earlier Zarr, never a folder of the user's that only shares the name.
+    zarr_markers = ("zarr.json", ".zgroup", ".zarray", ".zmetadata")
+    if (
+        out_path.exists()
+        and any(out_path.iterdir())
+        and not any((out_path / m).exists() for m in zarr_markers)
+    ):
+        raise UsageError(
+            f"--output {out_path} is an existing folder, not a Zarr store; pass a new path"
+        )
     if out_path.exists():
         shutil.rmtree(out_path)
     try:
@@ -391,6 +401,14 @@ def weather_skill(
                 output_paths: list[Path] = []
                 if output:
                     output_paths = [Path(p) for p in (args.output or [])]
+                    # Fail before the skill runs, not after a long fetch.
+                    for path in output_paths:
+                        blocker = next((p for p in path.parents if p.is_file()), None)
+                        if blocker is not None:
+                            raise UsageError(
+                                f"--output {path} is inside {blocker}, which is a file, "
+                                "not a folder; pass a path under a folder"
+                            )
                     if not output_paths:
                         params["output"] = None
                     else:
