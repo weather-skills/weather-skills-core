@@ -119,24 +119,16 @@ def fill_missing_data_var_attrs(src, dst):
     return out
 
 
-_CREDENTIAL_HINT = (
-    "If your organization provides these credentials, check that you are working in the "
-    "organization that holds them; otherwise set them in the environment."
-)
-
-
 def require_env(*names: str, message: str | None = None) -> tuple:
     """Return the values of the named environment variables, in order.
 
     Unset or empty vars are missing; raises ``UsageError`` with ``message`` or a
-    default listing the missing names, followed by a hint to check the active
-    organization. Never print or log the values.
+    default listing the missing names. Never print or log the values.
     """
     values = [os.environ.get(name) for name in names]
     missing = [name for name, value in zip(names, values, strict=True) if not value]
     if missing:
-        text = message or f"missing required env var(s): {', '.join(missing)}."
-        raise UsageError(f"{text} {_CREDENTIAL_HINT}")
+        raise UsageError(message or f"missing required env var(s): {', '.join(missing)}")
     return tuple(values)
 
 
