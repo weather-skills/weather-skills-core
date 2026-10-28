@@ -831,3 +831,46 @@ def test_float64_input_joins_float32_output(tmp_path):
     passthrough(["-i", str(old), "-o", str(new)])
     pair(["-i", str(new), "-i", str(old), "-o", str(out)])
     assert seen["joined"].sizes["latitude"] == len(lats)
+
+
+def _zip_dir(src: Path, dest: Path, under: str | None) -> Path:
+    import zipfile
+
+    with zipfile.ZipFile(dest, "w") as zf:
+        for p in sorted(src.rglob("*")):
+            if p.is_file():
+                rel = p.relative_to(src).as_posix()
+                zf.write(p, f"{under}/{rel}" if under else rel)
+    return dest
+
+
+@pytest.mark.parametrize("under", [None, "sample.zarr"])
+def test_zipped_zarr_input_is_read(tmp_path, under):
+    """A zip of a Zarr store opens, whether the store sits at the root or one folder down."""
+    src = tmp_path / "sample.zarr"
+    make_gridded().to_zarr(src, consolidated=True)
+    zipped = _zip_dir(src, tmp_path / "sample.zarr.zip", under)
+    seen = {}
+
+    @weather_skill(name="s", version="1.0.0", output=False)
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), required=True)
+    def skill(ds, **kwargs):
+        seen["vars"] = sorted(ds.data_vars)
+
+    skill(["-i", str(zipped)])
+    assert seen["vars"] == sorted(make_gridded().data_vars)
+
+
+def test_netcdf_input_points_to_netcdf_io(tmp_path, capsys):
+    nc = tmp_path / "rain.nc"
+    nc.write_bytes(b"\x89HDF\r\n\x1a\n" + b"\0" * 64)
+
+    @weather_skill(name="s", version="1.0.0", output=False)
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), required=True)
+    def skill(ds, **kwargs):
+        pass
+
+    with pytest.raises(SystemExit) as exc:
+        skill(["-i", str(nc)])
+    assert exc.value.code == 2
+    assert "netcdf-io" in capsys.readouterr().err

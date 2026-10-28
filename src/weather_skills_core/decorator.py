@@ -203,7 +203,23 @@ def _open_zarr(path, io_spec=None):
     from weather_skills_core.standard_utils import normalize_latlon_coords, normalize_step_coord
     from weather_skills_core.units import normalize_unit_strings, quantify_dataset
 
-    ds = xr.open_zarr(path, consolidated=True)
+    if path.is_file():
+        import zipfile
+
+        if not zipfile.is_zipfile(path):
+            with path.open("rb") as f:
+                magic = f.read(4)
+            if magic in (b"CDF\x01", b"CDF\x02", b"\x89HDF"):
+                raise UsageError(
+                    f"{path} is a NetCDF file, not a Zarr store; read it into a Zarr with the "
+                    f"netcdf-io skill first (--netcdf {path.name} -o {path.stem}.zarr)"
+                )
+            raise UsageError(f"{path} is a file, not a Zarr store (a folder or a zipped Zarr)")
+        store, group = provenance_mod.zipped_zarr(path)
+        # Unconsolidated: consolidated reads miss a store one folder down in the zip.
+        ds = xr.open_zarr(store, group=group, consolidated=False)
+    else:
+        ds = xr.open_zarr(path, consolidated=True)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))
     ds = normalize_unit_strings(ds)
