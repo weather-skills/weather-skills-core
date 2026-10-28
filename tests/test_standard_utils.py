@@ -122,6 +122,19 @@ def test_bbox_subset_antimeridian_leaves_non_longitude_variables_alone():
     assert list(sub["tavg"].values) == [5, 6]
 
 
+def test_bbox_subset_box_smaller_than_a_cell_takes_nearest_cell():
+    lat = np.arange(10, -10.01, -0.25)
+    lon = np.arange(100, 115.01, 0.25)
+    ds = xr.Dataset(
+        {"precip": (("latitude", "longitude"), np.zeros((lat.size, lon.size)))},
+        coords={"latitude": lat, "longitude": lon},
+    )
+    # 0.1 deg box: lat -2.75 is inside it, but no 0.25 deg lon centre is.
+    sub = utils.bbox_subset(ds, "-2.7/107.6/-2.8/107.7")
+    assert list(sub["latitude"].values) == [-2.75]
+    assert list(sub["longitude"].values) == [107.75]
+
+
 def test_bbox_subset_empty_result_is_data_error():
     ds = make_gridded()
     with pytest.raises(DataError, match="selects no grid cells"):
