@@ -101,14 +101,6 @@ happens to that path:
 | a sequence | does one of the above per `-o`; counts must match |
 | `None` | writes nothing (the skill already did) |
 
-Before the skill runs, the decorator checks each `-o`. It may replace only
-what is safe to lose: a path that does not exist yet, an empty folder, or an
-earlier skill output (a Zarr or figure carrying `weather_skills_history`).
-Anything else may be the user's own data, so the skill exits 2 and asks for a
-new path; nothing is deleted. A `-o` under a file instead of a folder also
-exits 2. Skills that write the file themselves (returning `Path` or `None`)
-can rely on this check and need not repeat it.
-
 Skills that only print (inspect, resolve-*) pass
 `@weather_skill(..., output=False)` and get no `-o`.
 
