@@ -169,23 +169,11 @@ def write_output(value, out_path, history, first_ds):
         value.attrs = {**first_ds.attrs, **value.attrs}
     value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
-    # An existing --output is deleted and rewritten, so first make sure it is safe
-    # to delete: an empty folder or an earlier Zarr store. A file, or a folder
-    # holding anything else, may be the user's own data and is refused.
-    if out_path.exists():
-        if not out_path.is_dir():
-            raise UsageError(
-                f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
-            )
-        # A Zarr store has one of these at its top: v3 metadata, v2 group,
-        # v2 array, or v2 consolidated metadata.
-        zarr_metadata = ("zarr.json", ".zgroup", ".zarray", ".zmetadata")
-        is_zarr = any((out_path / name).exists() for name in zarr_metadata)
-        if not is_zarr and any(out_path.iterdir()):
-            raise UsageError(
-                f"--output {out_path} is an existing folder, not a Zarr store; pass a new path"
-            )
+    # The wrapper already checked that an existing --output is ours to replace.
+    if out_path.is_dir():
         shutil.rmtree(out_path)
+    elif out_path.exists():
+        out_path.unlink()
     try:
         value.to_zarr(out_path, mode="w", consolidated=True)
     except Exception:
@@ -425,6 +413,14 @@ def weather_skill(
                             raise UsageError(
                                 f"--output {path} is inside {blocker}, which is a file, "
                                 "not a folder; pass a path under a folder"
+                            )
+                        # The skill replaces --output, so never let it overwrite
+                        # something a weather skill did not write.
+                        if not provenance_mod.can_replace_output(path):
+                            raise UsageError(
+                                f"--output {path} already exists and was not written by a "
+                                "weather skill (it has no weather_skills_history), so it may "
+                                "be your own data; pass a new path"
                             )
                     if not output_paths:
                         params["output"] = None

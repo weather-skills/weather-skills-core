@@ -1,8 +1,10 @@
 """Provenance helpers: history load/stamp and figure metadata."""
 
+import json
 import subprocess
 from pathlib import Path
 
+import pytest
 from conftest import make_gridded
 from PIL import Image
 
@@ -351,3 +353,56 @@ def test_visualization_jpeg_official_mark_when_intact(tmp_path):
     assert provenance.load_figure_history(path) == chain
     after = list(Image.open(path).crop((320, 250, 400, 300)).get_flattened_data())
     assert before != after
+
+
+def test_geojson_history_is_a_top_level_member(tmp_path):
+    path = tmp_path / "region.geojson"
+    path.write_text(json.dumps({"type": "FeatureCollection", "features": []}))
+    chain = [entry()]
+    provenance.stamp_figure(path, chain)
+    doc = json.loads(path.read_text())
+    assert doc["type"] == "FeatureCollection"
+    assert json.loads(doc[provenance.HISTORY_ATTR]) == chain
+    assert provenance.load_figure_history(path) == chain
+
+
+@pytest.mark.parametrize("name", ["table.csv", "table.xlsx"])
+def test_table_history_lives_in_a_sidecar_tied_to_its_hash(tmp_path, name):
+    path = tmp_path / name
+    path.write_bytes(b"time,precip\n2026-01-01,1.0\n")
+    chain = [entry()]
+    provenance.stamp_figure(path, chain)
+    assert path.read_bytes() == b"time,precip\n2026-01-01,1.0\n"
+    assert provenance.history_sidecar(path).name == f"{name}.history.json"
+    assert provenance.load_figure_history(path) == chain
+
+    # Edited after the skill wrote it: the history no longer describes it.
+    path.write_bytes(b"time,precip\n2026-01-01,2.0\n")
+    assert provenance.load_figure_history(path) is None
+    assert not provenance.can_replace_output(path)
+
+
+def test_can_replace_output(tmp_path):
+    assert provenance.can_replace_output(tmp_path / "missing.png")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert provenance.can_replace_output(empty)
+
+    mine = tmp_path / "notes.csv"
+    mine.write_text("a,b\n")
+    assert not provenance.can_replace_output(mine)
+    provenance.stamp_figure(mine, [entry()])
+    assert provenance.can_replace_output(mine)
+
+    not_an_image = tmp_path / "fake.png"
+    not_an_image.write_text("hello")
+    assert not provenance.can_replace_output(not_an_image)
+
+    bad_geojson = tmp_path / "bad.geojson"
+    bad_geojson.write_text("{")
+    assert not provenance.can_replace_output(bad_geojson)
+
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("keep")
+    assert not provenance.can_replace_output(folder)

@@ -452,7 +452,7 @@ def test_run_loop_refuses_plain_file_output(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         copy(["-i", str(src), "-o", str(out)])
     assert exc.value.code == 2
-    assert "existing file, not a Zarr store" in capsys.readouterr().err
+    assert "not written by a weather skill" in capsys.readouterr().err
     assert out.read_text() == "keep me"
 
 
@@ -471,27 +471,70 @@ def test_run_loop_refuses_a_folder_that_is_not_a_zarr(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc:
         copy(["-i", str(src), "-o", str(out)])
     assert exc.value.code == 2
-    assert "existing folder, not a Zarr store" in capsys.readouterr().err
+    assert "not written by a weather skill" in capsys.readouterr().err
     assert (out / "notes.txt").read_text() == "keep me"
 
 
-@pytest.mark.parametrize("zarr_format", [2, 3, None])
-def test_run_loop_replaces_an_earlier_zarr_or_empty_folder(tmp_path, zarr_format):
+def test_run_loop_refuses_a_zarr_without_history(tmp_path, capsys):
     src = tmp_path / "in.zarr"
     out = tmp_path / "out.zarr"
     make_gridded().to_zarr(src, mode="w", consolidated=True)
-    if zarr_format is None:
-        out.mkdir()
-    else:
-        make_gridded(n_time=1).to_zarr(out, mode="w", zarr_format=zarr_format)
+    make_gridded(n_time=1).to_zarr(out, mode="w")
 
     @weather_skill(name="copy", version="0.1.0")
     @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
     def copy(ds, **kwargs):
         return ds
 
+    with pytest.raises(SystemExit) as exc:
+        copy(["-i", str(src), "-o", str(out)])
+    assert exc.value.code == 2
+    assert "not written by a weather skill" in capsys.readouterr().err
+    assert xr.open_zarr(out).sizes["time"] == 1
+
+
+@pytest.mark.parametrize("earlier", ["skill output", "empty folder"])
+def test_run_loop_replaces_an_earlier_output_or_empty_folder(tmp_path, earlier):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, **kwargs):
+        return ds
+
+    if earlier == "empty folder":
+        out.mkdir()
+    else:
+        copy(["-i", str(src), "-o", str(out)])
     copy(["-i", str(src), "-o", str(out)])
     assert xr.open_zarr(out).sizes["time"] == make_gridded().sizes["time"]
+
+
+def test_run_loop_refuses_a_file_before_the_skill_writes_it(tmp_path, capsys):
+    out = tmp_path / "map.png"
+    Image.new("RGB", (4, 4)).save(out)
+    ran = []
+
+    @weather_skill(name="plot", version="0.1.0")
+    def plot(output, **kwargs):
+        ran.append(True)
+        Image.new("RGB", (8, 8)).save(output)
+        return output
+
+    with pytest.raises(SystemExit) as exc:
+        plot(["-o", str(out)])
+    assert exc.value.code == 2
+    assert "not written by a weather skill" in capsys.readouterr().err
+    assert not ran
+    with Image.open(out) as img:
+        assert img.size == (4, 4)
+
+    out.unlink()
+    plot(["-o", str(out)])
+    plot(["-o", str(out)])
+    assert len(ran) == 2
 
 
 def test_run_loop_no_artifact(tmp_path):

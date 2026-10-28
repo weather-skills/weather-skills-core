@@ -18,6 +18,8 @@ from pathlib import Path
 
 HISTORY_ATTR = "weather_skills_history"
 SOURCE_ATTR = "weather_skills_source"
+# Tables keep their history in a sidecar file (see history_sidecar).
+TABLE_SUFFIXES = (".csv", ".xlsx", ".xlsm")
 
 _EXIF_USER_COMMENT = 0x9286  # EXIF UserComment tag
 _HTML_META_RE = re.compile(
@@ -458,7 +460,8 @@ def restamp_zarr(zarr_path: Path, history: list) -> None:
 
 
 def stamp_figure(path: Path, history: list) -> None:
-    """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, HTML, PDF, or SVG file.
+    """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, HTML, PDF, SVG, or GeoJSON/JSON
+    file, or a sidecar next to a CSV or Excel table.
 
     When the chain is intact (non-empty and schema-valid), also draw the
     provenance stamp (a ring around a star, bottom-right) on PNG/JPEG pixels,
@@ -559,14 +562,34 @@ def stamp_figure(path: Path, history: list) -> None:
         path.write_text(text, encoding="utf-8")
         return
 
+    if suffix in (".geojson", ".json"):
+        # A top-level key; in GeoJSON a foreign member, which RFC 7946 allows.
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc[HISTORY_ATTR] = payload
+        path.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
+        return
+
+    if suffix in TABLE_SUFFIXES:
+        # A table has nowhere to keep it, so the history goes in a sidecar with the
+        # table's hash. A table edited after the skill wrote it no longer matches.
+        sidecar = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(), HISTORY_ATTR: payload}
+        history_sidecar(path).write_text(json.dumps(sidecar, indent=1), encoding="utf-8")
+        return
+
     raise SkillError(
-        f"unsupported figure type {suffix!r} for {path}; expected .png, .jpg/.jpeg, .gif, "
-        ".html/.htm, .pdf, or .svg"
+        f"unsupported output type {suffix!r} for {path}; expected .png, .jpg/.jpeg, .gif, "
+        ".html/.htm, .pdf, .svg, .geojson/.json, .csv, or .xlsx/.xlsm"
     )
 
 
-def load_figure_history(path: Path) -> list | None:
-    """Read history from a stamped figure file, or None if absent."""
+def history_sidecar(path: Path) -> Path:
+    """The ``<name>.history.json`` file next to a table that holds its history."""
+    path = Path(path)
+    return path.with_name(f"{path.name}.history.json")
+
+
+def read_raw_history(path: Path) -> str | None:
+    """The raw ``weather_skills_history`` JSON text stamped on an output file, or None."""
     path = Path(path)
     suffix = path.suffix.lower()
 
@@ -574,45 +597,76 @@ def load_figure_history(path: Path) -> list | None:
         from PIL import Image
 
         with Image.open(path) as img:
-            raw = img.info.get(HISTORY_ATTR)
-        return coerce_chain(raw, path.name) if raw else None
+            return img.info.get(HISTORY_ATTR) or None
 
     if suffix in (".jpg", ".jpeg"):
         from PIL import Image
 
         with Image.open(path) as img:
             raw = img.getexif().get(_EXIF_USER_COMMENT)
-        if raw is None:
-            return None
         if isinstance(raw, bytes):
             if raw.startswith(b"ASCII\x00\x00\x00"):
                 raw = raw[8:].decode("ascii")
             else:
                 raw = raw.decode("utf-8", errors="replace")
-        return coerce_chain(raw, path.name)
+        return raw or None
 
     if suffix == ".gif":
         from PIL import Image
 
         with Image.open(path) as img:
             raw = img.info.get("comment")
-        return coerce_chain(raw.decode("utf-8"), path.name) if raw else None
+        return raw.decode("utf-8") if raw else None
 
     if suffix in (".html", ".htm"):
-        text = path.read_text(encoding="utf-8")
-        m = _HTML_META_RE.search(text)
-        if not m:
-            return None
-        return coerce_chain(html.unescape(m.group(1)), path.name)
+        m = _HTML_META_RE.search(path.read_text(encoding="utf-8"))
+        return html.unescape(m.group(1)) if m else None
 
     if suffix == ".pdf":
         from pypdf import PdfReader
 
         raw = (PdfReader(path).metadata or {}).get(f"/{HISTORY_ATTR}")
-        return coerce_chain(str(raw), path.name) if raw else None
+        return str(raw) if raw else None
 
     if suffix == ".svg":
         m = _SVG_META_RE.search(path.read_text(encoding="utf-8"))
-        return coerce_chain(html.unescape(m.group(1)), path.name) if m else None
+        return html.unescape(m.group(1)) if m else None
+
+    if suffix in (".geojson", ".json"):
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return (doc.get(HISTORY_ATTR) or None) if isinstance(doc, dict) else None
+
+    if suffix in TABLE_SUFFIXES:
+        sidecar = history_sidecar(path)
+        if not sidecar.is_file():
+            return None
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+        if meta.get("sha256") != hashlib.sha256(path.read_bytes()).hexdigest():
+            return None
+        return meta.get(HISTORY_ATTR) or None
 
     return None
+
+
+def load_figure_history(path: Path) -> list | None:
+    """Read history from a stamped output file, or None if absent."""
+    raw = read_raw_history(path)
+    return coerce_chain(raw, Path(path).name) if raw else None
+
+
+def can_replace_output(path: Path) -> bool:
+    """True when a skill may write over ``path``: nothing there, an empty folder,
+    or an earlier skill output (it carries a ``weather_skills_history``).
+
+    Anything else may be the user's own data and is left alone.
+    """
+    path = Path(path)
+    if not path.exists():
+        return True
+    try:
+        if path.is_dir():
+            return not any(path.iterdir()) or bool(load_history(path))
+        return read_raw_history(path) is not None
+    except Exception:  # noqa: BLE001
+        # Unreadable as its type (e.g. a .png that is not an image): not ours.
+        return False
