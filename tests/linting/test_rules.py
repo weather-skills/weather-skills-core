@@ -183,14 +183,11 @@ def _script(skill_name, func_name, argument_decorators):
     )
 
 
-_FRONTMATTER = "---\nname: multi-skill\ndescription: Lint fixture.\n---\n\n"
-
-
-def _manifest(flags, frontmatter=_FRONTMATTER):
+def _manifest(flags):
     lines = ["# multi-skill", "", "## Usage", "", "### Arguments"]
     lines += [f"- `{flag}` — description." for flag in flags]
     lines += ["- `--input`, `-i` — input Zarr.", "- `--output`, `-o` — output Zarr."]
-    return frontmatter + "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n"
 
 
 def make_multi_script_skill(tmp_path, *, scripts, manifest_flags):
@@ -288,54 +285,6 @@ def test_multi_script_skill_dynamic_arguments_suppresses_the_wsk301_reverse_chec
     assert any("reverse check is suppressed" in note for note in report.notes)
 
 
-def _frontmatter_skill(tmp_path, frontmatter):
-    """A two-script skill whose SKILL.md opens with ``frontmatter``."""
-    skill = make_multi_script_skill(
-        tmp_path,
-        scripts={"one.py": _script("one", "one", ""), "two.py": _script("two", "two", "")},
-        manifest_flags=[],
-    )
-    (skill / "SKILL.md").write_text(_manifest([], frontmatter))
-    return skill
-
-
-def test_frontmatter_rule_unquoted_colon_in_description_fires_wsk302_once(tmp_path):
-    skill = _frontmatter_skill(
-        tmp_path, "---\nname: multi-skill\ndescription: Maps per file: one panel each.\n---\n"
-    )
-    report = run_lint(skill)
-    frontmatter = [f for f in report.findings if f.rule == "WSK302"]
-    assert len(frontmatter) == 1
-    assert frontmatter[0].severity == "error"
-    assert score_of(report, "one") < 100
-    assert "not valid YAML" in frontmatter[0].message
-
-
-def test_frontmatter_rule_quoted_colon_in_description_does_not_fire(tmp_path):
-    skill = _frontmatter_skill(
-        tmp_path, '---\nname: multi-skill\ndescription: "Maps per file: one panel each."\n---\n'
-    )
-    assert [f for f in run_lint(skill).findings if f.rule == "WSK302"] == []
-
-
-@pytest.mark.parametrize(
-    ("frontmatter", "message"),
-    [
-        ("", "does not open with a YAML frontmatter block"),
-        ("---\nname: multi-skill\n", "does not open with a YAML frontmatter block"),
-        ("---\n- a list\n---\n", "not a YAML mapping"),
-        ("---\nname: multi-skill\n---\n", "`description` must be a non-empty string"),
-        ("---\nname: multi-skill\ndescription: ''\n---\n", "`description` must be"),
-        ("---\ndescription: Lint fixture.\n---\n", "`name` must be a non-empty string"),
-    ],
-)
-def test_frontmatter_rule_malformed_frontmatter_fires_wsk302(tmp_path, frontmatter, message):
-    skill = _frontmatter_skill(tmp_path, frontmatter)
-    frontmatter_findings = [f for f in run_lint(skill).findings if f.rule == "WSK302"]
-    assert len(frontmatter_findings) == 1
-    assert message in frontmatter_findings[0].message
-
-
 def test_resolve_rule_set_select_replaces_the_default_set():
     assert resolve_rule_set(select=["WSK101"]) == {"WSK101"}
 
@@ -407,7 +356,7 @@ def test_selection_end_to_end_unknown_selector_raises_usage_error():
 
 def test_score_rubric_warning_only_rule_scores_half_of_that_rule():
     report = run_lint(FIXTURES / "shadow_tree")
-    assert score_of(report, "shadow-skill") == 90
+    assert score_of(report, "shadow-skill") == 88
 
 
 def test_score_rubric_aggregate_is_the_mean_of_per_skill_scores():

@@ -85,11 +85,8 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
     """
     entry_args = {k: v for k, v in vars(args).items() if k not in strip_dests}
     for dest in ("date", "start_time", "end_time"):
-        value = params.get(dest)
-        if isinstance(value, list):
-            entry_args[dest] = [d.isoformat() for d in value]
-        elif value is not None:
-            entry_args[dest] = value.isoformat()
+        if dest in params and params[dest] is not None:
+            entry_args[dest] = params[dest].isoformat()
     entry_args = json.loads(json.dumps(entry_args, default=_history_json_default))
 
     if not input_paths:
@@ -173,16 +170,6 @@ def write_output(value, out_path, history, first_ds):
         raise UsageError(
             f"--output {out_path} is an existing file, not a Zarr store; pass a new path"
         )
-    # Replace an earlier Zarr, never a folder of the user's that only shares the name.
-    zarr_markers = ("zarr.json", ".zgroup", ".zarray", ".zmetadata")
-    if (
-        out_path.exists()
-        and any(out_path.iterdir())
-        and not any((out_path / m).exists() for m in zarr_markers)
-    ):
-        raise UsageError(
-            f"--output {out_path} is an existing folder, not a Zarr store; pass a new path"
-        )
     if out_path.exists():
         shutil.rmtree(out_path)
     try:
@@ -203,23 +190,7 @@ def _open_zarr(path, io_spec=None):
     from weather_skills_core.standard_utils import normalize_latlon_coords, normalize_step_coord
     from weather_skills_core.units import normalize_unit_strings, quantify_dataset
 
-    if path.is_file():
-        import zipfile
-
-        if not zipfile.is_zipfile(path):
-            with path.open("rb") as f:
-                magic = f.read(4)
-            if magic in (b"CDF\x01", b"CDF\x02", b"\x89HDF"):
-                raise UsageError(
-                    f"{path} is a NetCDF file, not a Zarr store; read it into a Zarr with the "
-                    f"netcdf-io skill first (--netcdf {path.name} -o {path.stem}.zarr)"
-                )
-            raise UsageError(f"{path} is a file, not a Zarr store (a folder or a zipped Zarr)")
-        store, group = provenance_mod.zipped_zarr(path)
-        # Unconsolidated: consolidated reads miss a store one folder down in the zip.
-        ds = xr.open_zarr(store, group=group, consolidated=False)
-    else:
-        ds = xr.open_zarr(path, consolidated=True)
+    ds = xr.open_zarr(path, consolidated=True)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))
     ds = normalize_unit_strings(ds)
@@ -417,14 +388,6 @@ def weather_skill(
                 output_paths: list[Path] = []
                 if output:
                     output_paths = [Path(p) for p in (args.output or [])]
-                    # Fail before the skill runs, not after a long fetch.
-                    for path in output_paths:
-                        blocker = next((p for p in path.parents if p.is_file()), None)
-                        if blocker is not None:
-                            raise UsageError(
-                                f"--output {path} is inside {blocker}, which is a file, "
-                                "not a folder; pass a path under a folder"
-                            )
                     if not output_paths:
                         params["output"] = None
                     else:
