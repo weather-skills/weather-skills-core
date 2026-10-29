@@ -70,7 +70,8 @@ metadata:
   parameter with hyphens turned into underscores (`--start-time` →
   `start_time`); `--input` arrives as `ds`.
 - The function **must** accept `**kwargs`. The decorator may pass keys you
-  did not name, and a skill without `**kwargs` refuses to load.
+  did not name (`output`, `dask`, `resources`), and a skill without
+  `**kwargs` refuses to load.
 - A handful of flags (`--bbox`, `--date`, `--start-time`, `--end-time`,
   `--variable`) arrive already parsed. Do not re-parse them; see
   [CONVENTIONS.md](references/CONVENTIONS.md#canonical-specials).
@@ -119,6 +120,62 @@ set `weather_skills_source`
 ([STANDARD_DATASET.md](references/STANDARD_DATASET.md#provenance)), write
 precipitation as rates, and stamp native spacing
 ([UNITS.md](references/UNITS.md)).
+
+## Larger-than-memory data
+
+Every skill has `--dask`, `--dask-workers N` (default `min(4, CPUs)`) and
+`--dask-chunk-size SIZE` (default `64MiB`); the decorator owns them. With
+`--dask` the run uses dask's threaded scheduler: inputs open in chunks, the
+skill builds a lazy result, and the decorator streams it to the output Zarr
+chunk by chunk. Peak memory is roughly workers × 3–4 × chunk size, not the
+size of the data. Without `--dask`, inputs open as plain numpy-backed arrays.
+
+A skill opts in by listing the extra in its header; `--dask` on a skill
+without it exits with a usage error naming the extra:
+
+```python
+# dependencies = [
+#   "weather-skills-core[dask]>=0.4.0",
+# ]
+```
+
+`@weather_skill(..., dask_default=True)` turns dask on unless the user passes
+`--no-dask`, for a skill that is only practical chunked.
+
+Two keyword arguments carry the run's state. Name them in the signature only
+if you use them:
+
+- `dask`: `None` without `--dask`, else `DaskSettings(workers, chunk_size)`.
+- `resources`: a `contextlib.ExitStack` the decorator closes after every
+  output is written, or when the run fails. Lazy data is read during the
+  write, after the function returns, so a temp dir or session it reads from
+  goes on the stack rather than in a `with` block:
+  `resources.enter_context(tempfile.TemporaryDirectory())`,
+  `resources.callback(fs.close)`.
+
+The same code runs with and without `--dask`. It streams when it never pulls
+full-size data into memory before returning:
+
+- Use xarray operations (`sel`, `where`, arithmetic, `resample`, `rolling`).
+  Avoid `.values`, `.load()`, `.compute()`, `np.asarray`, `float()`, `bool()`
+  and `.item()` on data variables; on coordinates they are fine.
+- For a check or a message that needs data values, reduce first and compute
+  the small results together: `xr.Dataset({...}).compute()`. Each compute
+  reads the input once, so batch them.
+- Fetchers open remote stores with `chunks="auto" if dask else None` and
+  keep `.load()` for the path without dask. A source of one file per day or
+  granule becomes one `dask.delayed` task per file that downloads, cuts to
+  the bbox and returns an array (`dask.array.from_delayed`). Import dask
+  inside that branch only, so `--help` never imports it.
+- Operations that need a whole dimension at once (`quantile`, `median`,
+  `apply_ufunc` over a core dim) need that dimension in one chunk:
+  `da.chunk({dim: -1})`. Pass `dask="parallelized"` to `apply_ufunc`.
+- The netCDF4 engine crashes when files are opened from several threads at
+  once; open with `h5netcdf`, or open serially.
+
+weather-skills' `tests/oom` suite checks this for every opted-in skill: no
+large compute before the write, and peak memory that stays flat as the
+input grows.
 
 ## Writing SKILL.md
 
@@ -182,7 +239,9 @@ catalogs, recipes) goes in `references/*.md`, linked from here.
 
 ## Checklist
 
-- Script under `scripts/`, PEP 723 block declaring `weather-skills-core`.
+- Script under `scripts/`, PEP 723 block declaring `weather-skills-core`
+  (`weather-skills-core[dask]` once the skill streams; see
+  [Larger-than-memory data](#larger-than-memory-data)).
 - `_SKILL_VERSION` in the script matches `metadata.version` in `SKILL.md`.
 - `SKILL.md` follows [Writing SKILL.md](#writing-skillmd); every flag is under Arguments.
 - `uv run weather-skills-core lint skills/<name>` is clean.

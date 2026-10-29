@@ -139,7 +139,9 @@ The decorator does all Zarr I/O. Skills never call `open_zarr` or
 store at the zip root or one folder down). Each is checked against its declared dims,
 GRIB-style unit strings are normalized, `step` is cast to
 `timedelta64[ns]`, lat/lon are snapped (below), and pint units are
-attached from each variable's `units` attr.
+attached from each variable's `units` attr. Inputs open numpy-backed, even
+when dask is installed; with `--dask` they open in dask chunks near
+`--dask-chunk-size`, aligned to the chunks on disk.
 
 **On write**, a returned Dataset is converted back to plain unit
 strings and then:
@@ -150,10 +152,22 @@ strings and then:
 - precipitation amounts get the amount CF `standard_name`;
 - data-variable attrs the skill dropped are copied back from the first
   input (matching variable names), and global attrs are inherited from it;
-- provenance is stamped, encodings are cleared, and the store is written
-  with `consolidated=True`. An existing path is replaced only if it is
-  an empty folder or an earlier skill output; anything else exits 2
-  before the skill runs.
+- provenance is stamped and encodings are cleared;
+- dask-backed data is rechunked to uniform chunks near the chunk-size
+  target (`--dask-chunk-size`, else 64 MiB);
+- the store is written as a sharded Zarr v3 with `consolidated=True`: one
+  shard per chunk, cut into inner chunks of about 1 MiB, so a reader can
+  fetch a map or a point's time series without reading whole shards.
+
+The write is atomic: the store goes to `.<name>.partial` beside the output
+and is renamed into place only when complete, so a failed run leaves the
+previous output untouched, and `-i` may name the same path as `-o`. An
+existing path is replaced only if it is an empty folder or an earlier skill
+output; anything else exits 2 before the skill runs.
+
+Lazy inputs are read while writing. A network failure there (fsspec/aiohttp
+HTTP errors, gcsfs `HttpError`, `requests` errors) exits with a `DataError`
+naming the output, with a credentials hint on 401/403.
 
 What the skill still owns: CF-compliant names and attrs on anything it
 creates, NaN for missing values, value conversions (`to_standard_units`),
