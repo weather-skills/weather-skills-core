@@ -124,8 +124,9 @@ def _rule_shadow(decl: SkillDeclaration) -> list[Finding]:
                     "WSK101",
                     decl,
                     shape.identity,
-                    "the decorator owns --dask/--no-dask/--dask-workers/--dask-chunk-size; "
-                    "drop this argument.",
+                    "the decorator owns --dask/--dask-workers/--dask-chunk-size and passes "
+                    "their values to the skill as the `dask`, `dask_workers` and "
+                    "`dask_chunk_size` kwargs; drop this argument and read those instead.",
                 )
             )
             continue

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
-import contextlib
-import os
 import re
 from dataclasses import dataclass
 
@@ -20,25 +17,14 @@ STANDARD_HELP = {
 
 
 # Reserved flags the decorator adds to every skill (like -o/--output).
-DASK_FLAGS = ("--dask", "--no-dask", "--dask-workers", "--dask-chunk-size")
+DASK_FLAGS = ("--dask", "--dask-workers", "--dask-chunk-size")
 DASK_DESTS = ("dask", "dask_workers", "dask_chunk_size")
-# Target chunk size of a run without --dask is the same default, in bytes (no dask needed).
-DEFAULT_DASK_CHUNK_SIZE = "64MiB"
-DEFAULT_CHUNK_BYTES = 64 * 2**20
 
 
 @dataclass(frozen=True)
 class StandardParameter:
     name: str
     flags: tuple
-
-
-@dataclass(frozen=True)
-class DaskSettings:
-    """Larger-than-memory mode, handed to the skill as ``dask`` (None without ``--dask``)."""
-
-    workers: int
-    chunk_size: str
 
 
 def standard_parameters():
@@ -53,88 +39,6 @@ def standard_parameters():
         StandardParameter("date", ("--date",)),
         StandardParameter("bbox", ("--bbox",)),
         StandardParameter("variable", ("--variable", "-v")),
-    )
-
-
-def add_dask_arguments(parser, *, default: bool = False) -> None:
-    """Add the reserved ``--dask`` / ``--no-dask`` flags to ``parser``; ``default`` is the state."""
-    parser.add_argument(
-        "--dask",
-        action=argparse.BooleanOptionalAction,
-        default=default,
-        help="Process data larger than memory in chunks with threaded dask "
-        f"(default: {'on' if default else 'off'}).",
-    )
-    parser.add_argument(
-        "--dask-workers",
-        type=int,
-        metavar="N",
-        help="Dask worker threads (default: min(4, CPU count)). Needs dask on.",
-    )
-    parser.add_argument(
-        "--dask-chunk-size",
-        metavar="SIZE",
-        help=f"Target dask chunk size (default: {DEFAULT_DASK_CHUNK_SIZE}). Needs dask on.",
-    )
-
-
-def dask_settings(args) -> DaskSettings | None:
-    """The ``DaskSettings`` for parsed ``args``, or None without ``--dask``.
-
-    Raises UsageError for a dask option without ``--dask``, a bad value, or
-    dask mode when dask is not installed.
-    """
-    if not args.dask:
-        given = [
-            flag
-            for flag, value in (
-                ("--dask-workers", args.dask_workers),
-                ("--dask-chunk-size", args.dask_chunk_size),
-            )
-            if value is not None
-        ]
-        if given:
-            raise UsageError(f"{' and '.join(given)} only apply when dask is on (--dask)")
-        return None
-    try:
-        import dask  # noqa: F401
-        from dask.utils import parse_bytes
-    except ImportError:
-        raise UsageError(
-            "dask mode needs dask, which this skill does not have; the skill must list "
-            "`weather-skills-core[dask]` in its script header dependencies"
-        ) from None
-    workers = args.dask_workers if args.dask_workers is not None else min(4, os.cpu_count() or 1)
-    if workers < 1:
-        raise UsageError(f"--dask-workers must be at least 1; got {workers}")
-    chunk_size = args.dask_chunk_size or DEFAULT_DASK_CHUNK_SIZE
-    try:
-        if parse_bytes(chunk_size) < 1:
-            raise ValueError(chunk_size)
-    except ValueError:
-        raise UsageError(f"--dask-chunk-size {chunk_size!r} is not a size like 100MiB") from None
-    return DaskSettings(workers, chunk_size)
-
-
-def chunk_bytes(settings: DaskSettings | None) -> int:
-    """The target chunk size in bytes: the ``--dask-chunk-size``, else the default."""
-    if settings is None:
-        return DEFAULT_CHUNK_BYTES
-    from dask.utils import parse_bytes
-
-    return parse_bytes(settings.chunk_size)
-
-
-def dask_config(settings: DaskSettings | None):
-    """Context manager running dask's threaded scheduler under ``settings`` (a no-op if None)."""
-    if settings is None:
-        return contextlib.nullcontext()
-    import dask
-
-    return dask.config.set(
-        scheduler="threads",
-        num_workers=settings.workers,
-        **{"array.chunk-size": settings.chunk_size},
     )
 
 

@@ -153,11 +153,11 @@ strings and then:
 - data-variable attrs the skill dropped are copied back from the first
   input (matching variable names), and global attrs are inherited from it;
 - provenance is stamped and encodings are cleared;
-- dask-backed data is rechunked to uniform chunks near the chunk-size
-  target (`--dask-chunk-size`, else 64 MiB);
-- the store is written as a sharded Zarr v3 with `consolidated=True`: one
-  shard per chunk, cut into inner chunks of about 1 MiB, so a reader can
-  fetch a map or a point's time series without reading whole shards.
+- the store is written with `consolidated=True`. With `--dask`, data is
+  first rechunked to uniform chunks near `--dask-chunk-size` and written as
+  a sharded Zarr v3: one shard per chunk, cut into inner chunks of about
+  1 MiB, so a reader can fetch a map or a point's time series without
+  reading whole shards. Without `--dask` there is no rechunking or sharding.
 
 The write is atomic: the store goes to `.<name>.partial` beside the output
 and is renamed into place only when complete, so a failed run leaves the

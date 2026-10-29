@@ -11,10 +11,8 @@ import zarr
 from conftest import make_forecast, make_gridded
 
 from weather_skills_core import (
-    DaskSettings,
     Dataset,
     UsageError,
-    standard_args,
     weather_skill,
     zarr_layout,
 )
@@ -41,43 +39,45 @@ def _is_dask(ds):
 def _copy_skill(seen=None, *, transform=lambda ds: ds):
     @weather_skill(name="copy", version="0.1.0")
     @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
-    def copy(ds, output, dask, resources, **kwargs):
+    def copy(ds, output, dask, dask_workers, dask_chunk_size, exit_stack, **kwargs):
         if seen is not None:
-            seen.update(dask=dask, lazy=_is_dask(ds))
+            seen.update(
+                dask=dask, workers=dask_workers, chunk_size=dask_chunk_size, lazy=_is_dask(ds)
+            )
         return transform(ds)
 
     return copy
 
 
-def test_dask_flags_parse_into_settings(tmp_path):
+def test_dask_flags_arrive_as_plain_kwargs(tmp_path):
     src = _write(tmp_path / "in.zarr")
     seen = {}
     copy = _copy_skill(seen)
     copy(["-i", str(src), "-o", str(tmp_path / "a.zarr")])
-    assert seen["dask"] is None
-    copy(["-i", str(src), "-o", str(tmp_path / "b.zarr"), "--dask"])
-    assert seen["dask"] == DaskSettings(min(4, os.cpu_count() or 1), "64MiB")
+    assert (seen["dask"], seen["workers"], seen["chunk_size"]) == (
+        False,
+        min(4, os.cpu_count() or 1),
+        "64MiB",
+    )
     copy(
-        ["-i", str(src), "-o", str(tmp_path / "c.zarr")]
+        ["-i", str(src), "-o", str(tmp_path / "b.zarr")]
         + ["--dask", "--dask-workers", "2", "--dask-chunk-size", "10MiB"]
     )
-    assert seen["dask"] == DaskSettings(2, "10MiB")
+    assert (seen["dask"], seen["workers"], seen["chunk_size"]) == (True, 2, "10MiB")
 
 
-def test_dask_settings_are_frozen():
-    with pytest.raises(AttributeError):
-        DaskSettings(1, "1MiB").workers = 2
+def test_dask_value_flags_are_unused_without_dask(tmp_path):
+    src = _write(tmp_path / "in.zarr")
+    seen = {}
+    _copy_skill(seen)(
+        ["-i", str(src), "-o", str(tmp_path / "out.zarr"), "--dask-chunk-size", "lots"]
+    )
+    assert seen["dask"] is False and seen["chunk_size"] == "lots"
 
 
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        (["--dask-workers", "2"], "--dask-workers only apply when dask is on"),
-        (["--dask-chunk-size", "1MiB"], "--dask-chunk-size only apply when dask is on"),
-        (
-            ["--dask-workers", "2", "--dask-chunk-size", "1MiB"],
-            "--dask-workers and --dask-chunk-size only apply when",
-        ),
         (["--dask", "--dask-workers", "0"], "at least 1"),
         (["--dask", "--dask-chunk-size", "lots"], "is not a size"),
         (["--dask", "--dask-chunk-size", "0"], "is not a size"),
@@ -111,7 +111,7 @@ def test_dask_flag_without_dask_installed_is_a_usage_error(tmp_path, capsys, mon
 
 
 def test_dask_flags_are_reserved_for_the_decorator():
-    for flag in ("--dask", "--no-dask", "--dask-workers", "--dask-chunk-size"):
+    for flag in ("--dask", "--dask-workers", "--dask-chunk-size"):
         with pytest.raises(ValueError, match="decorator owns them"):
 
             @weather_skill(name="s", version="0.1.0", output=False)
@@ -128,7 +128,6 @@ def test_dask_flags_are_on_every_skill_and_in_help(capsys):
     with pytest.raises(SystemExit):
         skill(["--help"])
     out = capsys.readouterr().out
-    assert "--dask, --no-dask" in out
     assert "--dask-workers N" in out and "--dask-chunk-size SIZE" in out
 
 
@@ -198,48 +197,17 @@ def test_dask_data_is_still_lazy_when_it_reaches_to_zarr(tmp_path, monkeypatch):
     assert reached == [True]
 
 
-def test_numpy_run_is_sharded_too_and_needs_no_dask(tmp_path, monkeypatch):
+def test_run_without_the_flag_writes_as_before(tmp_path, monkeypatch):
+    """No sharding, no rechunking, and no dask needed."""
     monkeypatch.setitem(sys.modules, "dask", None)
-    monkeypatch.setattr(standard_args, "DEFAULT_CHUNK_BYTES", 1024)
-    src = _write(tmp_path / "in.zarr", n_time=40, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0))
+    src = _write(tmp_path / "in.zarr", n_time=40)
     out = tmp_path / "out.zarr"
     seen = {}
     _copy_skill(seen)(["-i", str(src), "-o", str(out)])
     assert seen["lazy"] is False
     arr = zarr.open_group(out, mode="r")["precip"]
-    assert arr.metadata.zarr_format == 3 and arr.shards == (14, 3, 3)
-    xr.testing.assert_equal(
-        xr.open_zarr(out, chunks=None).load(),
-        make_gridded(n_time=40, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0)),
-    )
-
-
-@pytest.mark.parametrize(
-    ("shape", "itemsize", "dtype"),
-    [
-        ((100, 721, 1440), 4, "f4"),
-        ((240, 721, 1440), 4, "f4"),
-        ((5, 10**6), 4, "f4"),
-        ((50, 181, 360, 12), 8, "f8"),
-        ((40, 3, 3), 8, "f8"),
-        ((7,), 8, "f8"),
-    ],
-)
-def test_uniform_shape_is_close_to_dasks_auto_chunks(shape, itemsize, dtype):
-    from dask.array.core import normalize_chunks
-
-    limit = 8 * 2**20
-    auto = [c[0] for c in normalize_chunks("auto", shape, dtype=dtype, limit=limit)]
-    mine = zarr_layout.uniform_shape(shape, itemsize, limit)
-    assert all(abs(m - a) <= 1 for m, a in zip(mine, auto, strict=True))
-    assert np.prod(mine) * itemsize <= limit
-
-
-def test_flag_off_and_on_share_the_default_chunk_target():
-    assert standard_args.chunk_bytes(None) == standard_args.chunk_bytes(
-        DaskSettings(1, standard_args.DEFAULT_DASK_CHUNK_SIZE)
-    )
-    assert standard_args.chunk_bytes(DaskSettings(1, "1MiB")) == 2**20
+    assert arr.shards is None and arr.chunks == arr.shape
+    xr.testing.assert_equal(xr.open_zarr(out, chunks=None).load(), make_gridded(n_time=40))
 
 
 def _ragged(ds):
@@ -250,16 +218,14 @@ def _ragged(ds):
     )
 
 
-@pytest.mark.parametrize("flags", [[], TINY])
-def test_ragged_dask_chunks_from_a_skill_write_fine(tmp_path, flags):
+def test_ragged_dask_chunks_from_a_skill_write_fine(tmp_path):
     src = _write(tmp_path / "in.zarr", n_time=40)
     out = tmp_path / "out.zarr"
     # Plain to_zarr refuses these chunks; the decorator must not.
     with pytest.raises(ValueError, match="uniform"):
         _ragged(make_gridded(n_time=40)).to_zarr(tmp_path / "plain.zarr")
 
-    # A skill may build dask arrays itself, even without --dask.
-    _copy_skill(transform=_ragged)(["-i", str(src), "-o", str(out)] + flags)
+    _copy_skill(transform=_ragged)(["-i", str(src), "-o", str(out)] + TINY)
     expected = xr.open_zarr(src, chunks=None).isel(time=[0, 1, 2, 5, 6, *range(10, 40)])
     got = xr.open_zarr(out, chunks=None)
     np.testing.assert_array_equal(got.precip.values, expected.precip.values)
@@ -322,15 +288,15 @@ def test_input_and_output_may_be_the_same_path(tmp_path, flags):
 
 
 @pytest.mark.parametrize("flags", [[], ["--dask"]])
-def test_resources_close_after_the_outputs_are_written(tmp_path, flags):
+def test_exit_stack_closes_after_the_outputs_are_written(tmp_path, flags):
     src = _write(tmp_path / "in.zarr")
     out = tmp_path / "out.zarr"
     events = []
 
     @weather_skill(name="s", version="0.1.0")
     @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
-    def skill(ds, output, resources, **kwargs):
-        resources.callback(lambda: events.append(("closed", output.exists())))
+    def skill(ds, output, exit_stack, **kwargs):
+        exit_stack.callback(lambda: events.append(("closed", output.exists())))
         events.append(("ran", output.exists()))
         return ds
 
@@ -338,15 +304,15 @@ def test_resources_close_after_the_outputs_are_written(tmp_path, flags):
     assert events == [("ran", False), ("closed", True)]
 
 
-def test_resources_close_when_the_skill_or_write_fails(tmp_path):
+def test_exit_stack_closes_when_the_skill_or_write_fails(tmp_path):
     src = _write(tmp_path / "in.zarr")
     events = []
 
     def run(body):
         @weather_skill(name="s", version="0.1.0")
         @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
-        def skill(ds, output, resources, **kwargs):
-            resources.callback(events.append, "closed")
+        def skill(ds, output, exit_stack, **kwargs):
+            exit_stack.callback(events.append, "closed")
             return body(ds)
 
         return skill
@@ -361,14 +327,14 @@ def test_resources_close_when_the_skill_or_write_fails(tmp_path):
     assert events == ["closed", "closed"]
 
 
-def test_resources_can_hold_a_temp_dir_lazy_data_reads_from(tmp_path):
+def test_exit_stack_can_hold_a_temp_dir_lazy_data_reads_from(tmp_path):
     out = tmp_path / "out.zarr"
 
     @weather_skill(name="s", version="0.1.0")
-    def skill(output, resources, dask, **kwargs):
+    def skill(output, exit_stack, dask, **kwargs):
         import tempfile
 
-        scratch = resources.enter_context(tempfile.TemporaryDirectory())
+        scratch = exit_stack.enter_context(tempfile.TemporaryDirectory())
         _write(f"{scratch}/t.zarr")
         # Lazy data that outlives the function: only the write may read it.
         skill.scratch = scratch
@@ -474,55 +440,6 @@ def test_convert_dataarray_matches_on_numpy_and_dask_and_stays_lazy(
         lazy.pint.dequantify().compute() if quantified else lazy.compute(),
         eager.pint.dequantify() if quantified else eager,
     )
-
-
-def _default_on_skill(seen):
-    @weather_skill(name="s", version="0.1.0", dask_default=True)
-    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
-    def skill(ds, output, dask, **kwargs):
-        seen.update(dask=dask, lazy=_is_dask(ds))
-        return ds
-
-    return skill
-
-
-def test_dask_default_turns_dask_on_until_no_dask(tmp_path):
-    src = _write(tmp_path / "in.zarr")
-    seen = {}
-    skill = _default_on_skill(seen)
-    skill(["-i", str(src), "-o", str(tmp_path / "a.zarr")])
-    assert seen["dask"] is not None and seen["lazy"] is True
-    skill(["-i", str(src), "-o", str(tmp_path / "b.zarr"), "--no-dask"])
-    assert seen["dask"] is None and seen["lazy"] is False
-    skill(["-i", str(src), "-o", str(tmp_path / "c.zarr"), "--dask-workers", "2"])
-    assert seen["dask"].workers == 2
-
-
-def test_dask_default_still_needs_dask_installed_and_flags_need_dask_on(
-    tmp_path, capsys, monkeypatch
-):
-    src = _write(tmp_path / "in.zarr")
-    args = ["-i", str(src), "-o", str(tmp_path / "out.zarr")]
-    skill = _default_on_skill({})
-    with pytest.raises(SystemExit) as exc:
-        skill([*args, "--no-dask", "--dask-chunk-size", "1MiB"])
-    assert exc.value.code == 2 and "only apply when dask is on" in capsys.readouterr().err
-    monkeypatch.setitem(sys.modules, "dask", None)
-    with pytest.raises(SystemExit) as exc:
-        skill(args)
-    assert exc.value.code == 2 and "weather-skills-core[dask]" in capsys.readouterr().err
-    skill([*args, "--no-dask"])
-    assert (tmp_path / "out.zarr").exists()
-
-
-def test_dask_stays_off_by_default_and_help_shows_the_default(capsys):
-    @weather_skill(name="s", version="0.1.0", output=False, dask_default=True)
-    def skill(**kwargs):
-        pass
-
-    with pytest.raises(SystemExit):
-        skill(["--help"])
-    assert "(default: on)" in capsys.readouterr().out
 
 
 def _stand_in(module, name, *bases):

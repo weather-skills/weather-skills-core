@@ -70,7 +70,7 @@ metadata:
   parameter with hyphens turned into underscores (`--start-time` →
   `start_time`); `--input` arrives as `ds`.
 - The function **must** accept `**kwargs`. The decorator may pass keys you
-  did not name (`output`, `dask`, `resources`), and a skill without
+  did not name (`output`, `dask`, `dask_workers`, `dask_chunk_size`, `exit_stack`), and a skill without
   `**kwargs` refuses to load.
 - A handful of flags (`--bbox`, `--date`, `--start-time`, `--end-time`,
   `--variable`) arrive already parsed. Do not re-parse them; see
@@ -139,19 +139,18 @@ without it exits with a usage error naming the extra:
 # ]
 ```
 
-`@weather_skill(..., dask_default=True)` turns dask on unless the user passes
-`--no-dask`, for a skill that is only practical chunked.
+The skill receives the flags' values as plain keyword arguments, and an
+exit stack. Name them in the signature only if you use them:
 
-Two keyword arguments carry the run's state. Name them in the signature only
-if you use them:
-
-- `dask`: `None` without `--dask`, else `DaskSettings(workers, chunk_size)`.
-- `resources`: a `contextlib.ExitStack` the decorator closes after every
+- `dask` (bool), `dask_workers` (int), `dask_chunk_size` (str, e.g.
+  `"64MiB"`): the parsed `--dask`, `--dask-workers`, `--dask-chunk-size`.
+  The last two are unused without `--dask`.
+- `exit_stack`: a `contextlib.ExitStack` the decorator closes after every
   output is written, or when the run fails. Lazy data is read during the
   write, after the function returns, so a temp dir or session it reads from
   goes on the stack rather than in a `with` block:
-  `resources.enter_context(tempfile.TemporaryDirectory())`,
-  `resources.callback(fs.close)`.
+  `exit_stack.enter_context(tempfile.TemporaryDirectory())`,
+  `exit_stack.callback(fs.close)`.
 
 The same code runs with and without `--dask`. It streams when it never pulls
 full-size data into memory before returning:

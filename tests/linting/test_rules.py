@@ -115,7 +115,6 @@ def test_shadow_rule_canonical_variable_does_not_fire_wsk101(tmp_path):
     "decl",
     [
         "@weather_skill.argument('--dask', action='store_true')\n",
-        "@weather_skill.argument('--no-dask', action='store_true')\n",
         "@weather_skill.argument('--dask-workers', type=int)\n",
         "@weather_skill.argument('--dask-chunk-size')\n",
         "@weather_skill.argument('--threads', dest='dask_workers', type=int)\n",
@@ -128,6 +127,7 @@ def test_shadow_rule_dask_flags_fire_wsk101(tmp_path, decl):
     shadow = [f for f in run_lint(skill).findings if f.rule == "WSK101"]
     assert len(shadow) == 1
     assert "decorator owns --dask" in shadow[0].message
+    assert "`dask_workers`" in shadow[0].message
 
 
 def test_skill_md_may_document_the_decorator_owned_dask_flags(tmp_path):
