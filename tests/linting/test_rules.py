@@ -111,6 +111,34 @@ def test_shadow_rule_canonical_variable_does_not_fire_wsk101(tmp_path):
     assert shadow == []
 
 
+@pytest.mark.parametrize(
+    "decl",
+    [
+        "@weather_skill.argument('--dask', action='store_true')\n",
+        "@weather_skill.argument('--no-dask', action='store_true')\n",
+        "@weather_skill.argument('--dask-workers', type=int)\n",
+        "@weather_skill.argument('--dask-chunk-size')\n",
+        "@weather_skill.argument('--threads', dest='dask_workers', type=int)\n",
+    ],
+)
+def test_shadow_rule_dask_flags_fire_wsk101(tmp_path, decl):
+    skill = _shadow_rule_single_skill(
+        tmp_path, name="own-dask", decorator_head="", argument_decorators=decl
+    )
+    shadow = [f for f in run_lint(skill).findings if f.rule == "WSK101"]
+    assert len(shadow) == 1
+    assert "decorator owns --dask" in shadow[0].message
+
+
+def test_skill_md_may_document_the_decorator_owned_dask_flags(tmp_path):
+    skill = make_multi_script_skill(
+        tmp_path, scripts={"one.py": _script("one", "one", "")}, manifest_flags=[]
+    )
+    manifest = skill / "SKILL.md"
+    manifest.write_text(manifest.read_text() + "- `--dask` — chunked mode.\n")
+    assert run_lint(skill).findings == []
+
+
 def test_skill_md_rule_drift_fires_in_both_directions():
     report = run_lint(FIXTURES / "drift_tree")
     drift = [f for f in findings_for(report, "drift-skill") if f.rule == "WSK301"]

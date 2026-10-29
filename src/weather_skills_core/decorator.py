@@ -1,18 +1,20 @@
 """``@weather_skill`` decorator: CLI, open Dataset inputs, stamp/write outputs."""
 
 import argparse
+import contextlib
 import functools
 import inspect
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
 
 from weather_skills_core import provenance as provenance_mod
-from weather_skills_core import standard_args
+from weather_skills_core import standard_args, zarr_layout
 from weather_skills_core import standard_dataset as std
 from weather_skills_core.dataset_type import Dataset
-from weather_skills_core.errors import SkillError, UsageError
+from weather_skills_core.errors import DataError, SkillError, UsageError
 
 # xarray, numpy, and pint load inside the functions that use them, so importing
 # a skill (and ``--help`` / usage errors) stays fast.
@@ -144,8 +146,34 @@ def prepare_dataset_output(ds, *, first_ds=None):
     return normalize_latlon_coords(ds)
 
 
-def write_output(value, out_path, history, first_ds):
-    """Write one skill result: stamp a returned Path, or ``to_zarr`` a Dataset."""
+# Network-library errors a lazy source read raises while the output is written, matched
+# by qualified name so none of those libraries has to be imported.
+SOURCE_READ_ERRORS = frozenset(
+    {
+        "aiohttp.client_exceptions.ClientError",  # fsspec HTTP, gcsfs connection errors
+        "gcsfs.retry.HttpError",
+        "requests.exceptions.RequestException",
+    }
+)
+
+
+def source_read_error(exc, out_path):
+    """A ``DataError`` for a network read failure ``exc``, or None for any other exception."""
+    if not SOURCE_READ_ERRORS & {f"{c.__module__}.{c.__qualname__}" for c in type(exc).__mro__}:
+        return None
+    message = f"reading the input data failed while writing {out_path}: {type(exc).__name__}: {exc}"
+    if re.search(r"\b(401|403)\b|Forbidden", str(exc)):
+        message += " (check your credentials and access to the source)"
+    return DataError(message)
+
+
+def write_output(value, out_path, history, first_ds, dask=None):
+    """Write one skill result: stamp a returned Path, or ``to_zarr`` a Dataset.
+
+    A Dataset is written to a sibling path and renamed into place, so a failure
+    leaves no partial output and the input may be ``out_path`` itself. Dask-backed
+    data is rechunked to match the shards the Zarr is written with.
+    """
     if isinstance(value, (str, Path)):
         written = Path(value)
         if written.resolve() != out_path.resolve():
@@ -169,22 +197,36 @@ def write_output(value, out_path, history, first_ds):
         value.attrs = {**first_ds.attrs, **value.attrs}
     value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
-    # The wrapper already checked that an existing --output is ours to replace.
-    if out_path.is_dir():
-        shutil.rmtree(out_path)
-    elif out_path.exists():
-        out_path.unlink()
+    value, encoding = zarr_layout.prepare_chunks(value, standard_args.chunk_bytes(dask))
+    partial = out_path.with_name(f".{out_path.name}.partial")
+    if partial.exists():
+        shutil.rmtree(partial)
     try:
-        value.to_zarr(out_path, mode="w", consolidated=True)
-    except Exception:
-        if out_path.exists():
+        try:
+            value.to_zarr(partial, mode="w", consolidated=True, encoding=encoding)
+        except Exception as exc:
+            error = source_read_error(exc, out_path)
+            if error is None:
+                raise
+            raise error from exc
+        # The wrapper already checked that an existing --output is ours to replace.
+        if out_path.is_dir():
             shutil.rmtree(out_path)
-        raise
+        elif out_path.exists():
+            out_path.unlink()
+        partial.rename(out_path)
+    finally:
+        if partial.exists():
+            shutil.rmtree(partial)
     print(f"Wrote: {out_path}", file=sys.stderr)
 
 
-def _open_zarr(path, io_spec=None):
-    """Open, validate, and quantify one Zarr store."""
+def _open_zarr(path, io_spec=None, dask=None):
+    """Open, validate, and quantify one Zarr store.
+
+    Numpy-backed unless ``dask`` is set (xarray would otherwise chunk with dask
+    whenever it is installed).
+    """
     if not path.exists():
         raise UsageError(f"input not found: {path}")
     import xarray as xr
@@ -192,6 +234,7 @@ def _open_zarr(path, io_spec=None):
     from weather_skills_core.standard_utils import normalize_latlon_coords, normalize_step_coord
     from weather_skills_core.units import normalize_unit_strings, quantify_dataset
 
+    chunks = "auto" if dask else None
     if path.is_file():
         import zipfile
 
@@ -205,9 +248,9 @@ def _open_zarr(path, io_spec=None):
             raise UsageError(f"{path} is a file, not a Zarr store (a folder or a zipped Zarr)")
         store, group = provenance_mod.zipped_zarr(path)
         # Unconsolidated: consolidated reads miss a store one folder down in the zip.
-        ds = xr.open_zarr(store, group=group, consolidated=False)
+        ds = xr.open_zarr(store, group=group, consolidated=False, chunks=chunks)
     else:
-        ds = xr.open_zarr(path, consolidated=True)
+        ds = xr.open_zarr(path, consolidated=True, chunks=chunks)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))
     ds = normalize_unit_strings(ds)
@@ -218,7 +261,7 @@ def _open_zarr(path, io_spec=None):
     return quantify_dataset(ds)
 
 
-def open_dataset_params(params, arguments):
+def open_dataset_params(params, arguments, dask=None):
     """Replace Dataset-typed Path values with opened/validated/quantified datasets.
 
     Values (or list items) that expose ``zarr_paths() -> list[Path]`` are also
@@ -233,7 +276,7 @@ def open_dataset_params(params, arguments):
         path = Path(path)
         resolved = path.resolve()
         if resolved not in cache:
-            cache[resolved] = _open_zarr(path, io_spec)
+            cache[resolved] = _open_zarr(path, io_spec, dask)
             input_paths.append(path)
             upstream.append(provenance_mod.load_history(path))
         ds = cache[resolved]
@@ -283,6 +326,7 @@ def weather_skill(
     name,
     version,
     output: bool = True,
+    dask_default: bool = False,
 ):
     """Turn a function into a weather skill CLI with validated I/O and provenance.
 
@@ -301,6 +345,31 @@ def weather_skill(
     number of ``--output`` paths. Returning ``None`` skips decorator write
     (skill already wrote). Set ``output=False`` for inspect-only skills.
     ``probe=True`` on an argument drops required flags and skips writing.
+
+    The decorator also owns ``--dask/--no-dask``, ``--dask-workers N`` and
+    ``--dask-chunk-size SIZE`` on every skill (do not declare them). The skill
+    receives ``dask``: None normally, else a ``DaskSettings(workers, chunk_size)``.
+    With dask on, the run uses dask's threaded scheduler, and a skill that must
+    handle data larger than memory opens its remote sources with
+    ``chunks="auto" if dask else None`` and keeps arrays lazy; the decorator opens
+    inputs chunked and rechunks to the Zarr shards. Without it, inputs are
+    numpy-backed. Dask is off unless ``--dask`` is passed; ``dask_default=True``
+    turns it on unless ``--no-dask`` is passed. Either way the skill must list
+    ``weather-skills-core[dask]`` in its script header (dask on without it is a
+    usage error). The two value flags need dask on.
+
+    Every Zarr output is written sharded (Zarr v3): shards near the chunk size
+    (``--dask-chunk-size``, default 64MiB), cut into ~1 MiB inner chunks. The
+    write goes to a sibling path renamed into place, so a failure leaves no
+    partial output. A network error raised
+    while writing (a lazy read of the source: aiohttp, gcsfs or requests) is
+    reported as a ``DataError`` naming the output.
+
+    The skill also receives ``resources``, a ``contextlib.ExitStack`` closed after
+    every output is written (or the run fails), with or without ``--dask``. Lazy
+    data that depends on a temp dir or session registers it there:
+    ``resources.enter_context(tempfile.TemporaryDirectory())``,
+    ``resources.callback(fs.close)``.
 
     Skills open precip rates and amounts alike. The operation that cannot take
     amounts is ``rate_to_total`` (used by ``convert-to-totals``): multiplying
@@ -328,6 +397,11 @@ def weather_skill(
                     f"skill {name!r}: do not declare -o/--output; the decorator owns it "
                     "(pass output=False to opt out)"
                 )
+            if set(standard_args.DASK_FLAGS) & flags or arg.dest in standard_args.DASK_DESTS:
+                raise ValueError(
+                    f"skill {name!r}: do not declare --dask/--no-dask/--dask-workers/--dask-chunk-size; "
+                    "the decorator owns them"
+                )
 
         if not any(
             p.kind == inspect.Parameter.VAR_KEYWORD
@@ -352,6 +426,7 @@ def weather_skill(
                 metavar="PATH",
                 help="Output path (repeat once per returned artifact).",
             )
+        standard_args.add_dask_arguments(parser, default=dask_default)
         for arg in arguments:
             kwargs = dict(arg.kwargs)
             if arg.dataset_type is not None:
@@ -367,7 +442,8 @@ def weather_skill(
                 )
             parser.add_argument(*arg.option_strings, **kwargs)
 
-        strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
+        strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None}
+        strip_dests |= {"output", *standard_args.DASK_DESTS}
         # Options taking one value (store/append), for rewrite_negative_values.
         value_options = {
             opt
@@ -380,6 +456,8 @@ def weather_skill(
         def wrapper(argv=None):
             argv = sys.argv[1:] if argv is None else list(argv)
             argv = standard_args.rewrite_negative_values(argv, value_options)
+            # Closed after every output is written, or the run fails.
+            resources = contextlib.ExitStack()
 
             try:
                 probing = any(
@@ -394,8 +472,12 @@ def weather_skill(
                 finally:
                     for action, required in saved_required:
                         action.required = required
+                dask = standard_args.dask_settings(args)
+                resources.enter_context(standard_args.dask_config(dask))
                 params = standard_args.convert_standard_args(args, arguments)
-                params, input_paths, upstream, first_ds = open_dataset_params(params, arguments)
+                params, input_paths, upstream, first_ds = open_dataset_params(
+                    params, arguments, dask
+                )
                 if (
                     any(a.dataset_type is not None and a.dest == "input" for a in arguments)
                     and "input" in params
@@ -435,6 +517,8 @@ def weather_skill(
                             output_paths[0] if len(output_paths) == 1 else output_paths
                         )
 
+                params["dask"] = dask
+                params["resources"] = resources
                 result = fn(**params)
                 if not output or probing or result is None:
                     return result
@@ -457,12 +541,14 @@ def weather_skill(
                     revision=provenance_mod.resolve_skill_revision(fn),
                 )
                 for value, out_path in zip(results, output_paths, strict=True):
-                    write_output(value, out_path, history, first_ds)
+                    write_output(value, out_path, history, first_ds, dask)
                 return result
             except SkillError as exc:
                 msg = str(exc)
                 print(msg if not exc.prefix else f"Error: {msg}", file=sys.stderr)
                 sys.exit(exc.exit_code)
+            finally:
+                resources.close()
 
         wrapper.parser = parser
         return wrapper

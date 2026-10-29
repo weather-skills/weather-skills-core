@@ -344,7 +344,8 @@ def load_history(zarr_path: Path) -> list:
         import xarray as xr
 
         store, group = zipped_zarr(zarr_path) if zarr_path.is_file() else (zarr_path, None)
-        with xr.open_zarr(store, group=group, consolidated=False) as ds:
+        # chunks=None: read the attrs only, without building a dask graph.
+        with xr.open_zarr(store, group=group, consolidated=False, chunks=None) as ds:
             raw = ds.attrs.get(HISTORY_ATTR)
     except (OSError, KeyError, ValueError):
         return []
