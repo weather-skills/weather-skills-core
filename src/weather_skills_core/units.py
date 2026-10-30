@@ -86,7 +86,7 @@ _RATE_RE = re.compile(
 #   units / standard_name  what to_standard_units stamps (None keeps existing)
 #   standard_names, standard_name_endswith, standard_name_contains
 #                          CF standard_name matches, tried first
-#   name_hints             variable-name whole/prefix/suffix match — not units
+#   name_hints             whole name, or its first or last "_" word(s) — not units
 #   unit_candidates        units for convert/fingerprint helpers (not classify)
 #   depth_candidates       matched after ÷ liquid-water density in converts
 # ``temp`` is 2 m / air temperature only. Do not add sst, d2m, skt, or ``t``.
@@ -101,7 +101,17 @@ STANDARD = {
         "standard_name_contains": (),
         "unit_candidates": ("degree_Celsius", "kelvin", "degree_Fahrenheit"),
         "depth_candidates": (),
-        "name_hints": ("t2m", "2m_temperature", "temp", "tmax", "tmin", "tavg", "tas"),
+        "name_hints": (
+            "t2m",
+            "2m_temperature",
+            "temp",
+            "tmax",
+            "tmin",
+            "tavg",
+            "tas",
+            "tasmax",
+            "tasmin",
+        ),
     },
     # Listed before precip_amount so CF rate names win over amount names.
     "precip": {
@@ -115,7 +125,19 @@ STANDARD = {
         "standard_name_contains": (),
         "unit_candidates": ("mm day-1", "mm/day", "m s-1", "kg m-2 s-1", "kg m**-2 s**-1"),
         "depth_candidates": ("m s-1", "mm day-1"),
-        "name_hints": ("precip", "prcp", "rainfall", "rain", "tp", "pr", "total_precipitation"),
+        "name_hints": (
+            "precip",
+            "precipitation",
+            "prcp",
+            "rainfall",
+            "rain",
+            "tp",
+            "pr",
+            "total_precipitation",
+            "prate",
+            "tprate",
+            "mtpr",
+        ),
     },
     # Amount metadata for the totals utilities (rate × period → mm).
     "precip_amount": {
@@ -248,11 +270,13 @@ def classify_variable(name: str, *, units=None, standard_name=None) -> str | Non
 
     key = name.lower()
     for kind, spec in STANDARD.items():
-        if any(h == key or key.startswith(h) or key.endswith(h) for h in spec["name_hints"]):
+        if any(
+            h == key or key.startswith(h + "_") or key.endswith("_" + h) for h in spec["name_hints"]
+        ):
             if kind == "precip" and isinstance(units, str) and units.strip():
                 found = _precip_kind_from_hint_units(units)
                 if found is None:
-                    # Not precip units after all (prmsl starts with "pr"): try the next kind.
+                    # Not precip units after all (e.g. a quality index in "1"): try the next kind.
                     continue
                 return found
             if kind == "pressure" and isinstance(units, str) and units.strip():
