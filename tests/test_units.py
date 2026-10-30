@@ -430,6 +430,23 @@ def test_stamp_data_interval_singleton_step_without_origin_is_noop():
     assert DATA_INTERVAL_ATTR not in kept["tp"].attrs
 
 
+def test_stamp_data_interval_many_inits_uses_the_lead_spacing():
+    """Daily inits with 6-hourly leads: the cell is the 6 h lead gap, not the 1-day init gap."""
+    ds = xr.Dataset(
+        {"tp": (("time", "step"), np.ones((3, 4)), {"units": "mm day-1"})},
+        coords={
+            "time": np.array(["2026-01-01", "2026-01-02", "2026-01-03"], dtype="datetime64[ns]"),
+            "step": np.array([0, 6, 12, 18], dtype="timedelta64[h]").astype("timedelta64[ns]"),
+        },
+    )
+    assert stamp_data_interval(ds)["tp"].attrs[DATA_INTERVAL_ATTR] == "6 hour"
+
+    totals = ds.assign(tp=ds["tp"] * 1.5)
+    totals["tp"].attrs.update(units="mm", standard_name="precipitation_amount")
+    rates = precip_amounts_to_rates(totals, deaccumulate=False)
+    np.testing.assert_allclose(rates["tp"].values, 6.0)
+
+
 def test_stamp_data_interval_irregular_step_writes_cf_bounds():
     """Irregular step with no existing geometry writes CF bounds."""
     days = np.array([7, 10, 14, 21], dtype="timedelta64[D]").astype("timedelta64[ns]")

@@ -714,12 +714,12 @@ def _time_or_step_dim(ds, dim=None) -> str | None:
         if dim not in ds.dims:
             raise UsageError(f"dimension {dim!r} not in dataset (have {list(ds.dims)})")
         return dim
-    if "time" in ds.dims:
-        if ds.sizes["time"] == 1 and "step" in ds.dims:
-            return "step"
-        return "time"
+    # A forecast's cells run along its lead axis: ``time`` beside ``step`` holds
+    # the init(s), whose spacing is not a cell length.
     if "step" in ds.dims:
         return "step"
+    if "time" in ds.dims:
+        return "time"
     return None
 
 
