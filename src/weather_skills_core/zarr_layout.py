@@ -36,17 +36,41 @@ def inner_chunks(shard: tuple, itemsize: int) -> tuple:
     return tuple(inner)
 
 
+def shard_shape(var, chunk_bytes: int) -> tuple:
+    """A uniform chunk shape of about ``chunk_bytes`` for ``var``.
+
+    Incoming dask chunks that are reasonably large (at least a quarter of the
+    target) are kept as multiples where possible, so rechunking stays cheap.
+    Otherwise (numpy data, or chunks fragmented by earlier operations, which dask's
+    ``"auto"`` would follow into tiny shards) the leading dim is split first and
+    trailing (spatial) dims are kept whole.
+    """
+    budget = max(1, chunk_bytes // var.dtype.itemsize)
+    if var.chunks is not None and math.prod(max(c) for c in var.chunks) >= budget // 4:
+        from dask.array.core import normalize_chunks
+
+        sizes = normalize_chunks(
+            "auto", var.shape, dtype=var.dtype, limit=chunk_bytes, previous_chunks=var.chunks
+        )
+        return tuple(c[0] for c in sizes)
+    shard = list(var.shape)
+    for i in range(len(shard)):
+        rest = math.prod(shard[i + 1 :])
+        if rest <= budget:
+            shard[i] = max(1, min(shard[i], budget // rest))
+            break
+        shard[i] = 1
+    return tuple(shard)
+
+
 def prepare_chunks(ds, chunk_bytes: int):
     """Return ``(ds, encoding)`` ready for ``to_zarr``: every data variable sharded.
 
-    Shard shape is a uniform chunk shape near ``chunk_bytes`` (dask's ``"auto"``,
-    keeping on-disk chunk multiples where it can), with inner chunks from
-    ``inner_chunks`` (Zarr v3 sharding). Dask-backed variables are rechunked to the
-    shard shape, so each dask chunk maps to whole shards. Dask-backed coordinates
-    are made uniform too.
+    Shard shape is a uniform chunk shape near ``chunk_bytes`` (see ``shard_shape``),
+    with inner chunks from ``inner_chunks`` (Zarr v3 sharding). Dask-backed variables
+    are rechunked to the shard shape, so each dask chunk maps to whole shards.
+    Dask-backed coordinates are made uniform too.
     """
-    from dask.array.core import normalize_chunks
-
     updates, encoding = {}, {}
     for name, var in ds.variables.items():
         if name in ds.indexes or var.ndim == 0 or var.size == 0 or var.dtype.hasobject:
@@ -54,10 +78,7 @@ def prepare_chunks(ds, chunk_bytes: int):
         lazy = var.chunks is not None
         if not (lazy or name in ds.data_vars):
             continue
-        sizes = normalize_chunks(
-            "auto", var.shape, dtype=var.dtype, limit=chunk_bytes, previous_chunks=var.chunks
-        )
-        shard = tuple(c[0] for c in sizes)
+        shard = shard_shape(var, chunk_bytes)
         if lazy:
             updates[name] = var.chunk(dict(zip(var.dims, shard, strict=True)))
         if name in ds.data_vars:

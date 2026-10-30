@@ -210,6 +210,65 @@ def test_run_without_the_flag_writes_as_before(tmp_path, monkeypatch):
     xr.testing.assert_equal(xr.open_zarr(out, chunks=None).load(), make_gridded(n_time=40))
 
 
+def test_inputs_share_the_first_inputs_chunks_on_shared_dims(tmp_path):
+    grid = dict(n_time=40, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0))
+    a = make_gridded(**grid).chunk(time=5)
+    b = make_gridded(**grid).chunk(time=8)
+    a.to_zarr(tmp_path / "a.zarr", mode="w", consolidated=True)
+    b.to_zarr(tmp_path / "b.zarr", mode="w", consolidated=True)
+    short = make_gridded(n_time=7, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0))
+    short.to_zarr(tmp_path / "short.zarr", mode="w", consolidated=True)
+    seen = []
+
+    @weather_skill(name="pair", version="0.1.0", output=False)
+    @weather_skill.argument(
+        "-i", "--input", action="append", type=Dataset("observations"), required=True
+    )
+    def pair(ds, **kwargs):
+        seen.extend(d.pint.dequantify().chunksizes for d in ds)
+
+    inputs = [x for p in ("a", "b", "short") for x in ("-i", str(tmp_path / f"{p}.zarr"))]
+    pair(inputs + ["--dask", "--dask-chunk-size", "1KiB"])
+    first, second, third = seen
+    assert first["time"][0] % 5 == 0 and first["time"][0] % 8 != 0
+    assert second == first  # b is stored in chunks of 8, but follows the first input
+    assert third["time"] != first["time"]  # a different length keeps its own chunks
+    assert third["latitude"] == first["latitude"]
+
+
+@pytest.mark.parametrize(
+    ("shape", "chunks", "expected"),
+    [
+        # A map just under the target, in fragmented chunks: whole maps, split on time.
+        ((3, 721, 1439), (1, 721, 2), (1, 721, 1439)),
+        ((10, 721, 1439), (1, 3, 3), (1, 721, 1439)),
+        # A map over the target: split the leading spatial dim, keep the last whole.
+        ((2, 2000, 3000), (1, 5, 5), (1, 349, 3000)),
+        # Several maps fit: split on time.
+        ((300, 100, 100), (1, 7, 3), (104, 100, 100)),
+    ],
+)
+def test_fragmented_chunks_do_not_make_tiny_shards(shape, chunks, expected):
+    import dask.array as da
+
+    target = 4 * 2**20
+    var = xr.Variable(("time", "y", "x"), da.zeros(shape, chunks=chunks, dtype="f4"))
+    assert zarr_layout.shard_shape(var, target) == expected
+    assert np.prod(expected) * 4 <= target
+    ds = xr.Dataset({"v": var})
+    out, encoding = zarr_layout.prepare_chunks(ds, target)
+    assert encoding["v"]["shards"] == expected
+    assert out.v.data.chunksize == expected
+
+
+def test_large_incoming_chunks_are_kept_as_multiples():
+    import dask.array as da
+
+    var = xr.Variable(("time", "y"), da.zeros((100, 1000), chunks=(5, 1000), dtype="f4"))
+    shard = zarr_layout.shard_shape(var, 40 * 4000)  # 40 rows of 1000 float32
+    assert shard == (40, 1000) and shard[0] % 5 == 0
+
+
 def _ragged(ds):
     lazy = ds.pint.dequantify().chunk(time=3)
     return xr.concat(

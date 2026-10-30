@@ -141,7 +141,9 @@ GRIB-style unit strings are normalized, `step` is cast to
 `timedelta64[ns]`, lat/lon are snapped (below), and pint units are
 attached from each variable's `units` attr. Inputs open numpy-backed, even
 when dask is installed; with `--dask` they open in dask chunks near
-`--dask-chunk-size`, aligned to the chunks on disk.
+`--dask-chunk-size`, aligned to the chunks on disk. Every input after the
+first takes the first input's chunk sizes on the dims they share (same
+length), so combining inputs elementwise stays blockwise.
 
 **On write**, a returned Dataset is converted back to plain unit
 strings and then:
@@ -154,7 +156,8 @@ strings and then:
   input (matching variable names), and global attrs are inherited from it;
 - provenance is stamped and encodings are cleared;
 - the store is written with `consolidated=True`. With `--dask`, data is
-  first rechunked to uniform chunks near `--dask-chunk-size` and written as
+  first rechunked to uniform chunks near `--dask-chunk-size` (split on the
+  leading dim, spatial dims kept whole when a map fits) and written as
   a sharded Zarr v3: one shard per chunk, cut into inner chunks of about
   1 MiB, so a reader can fetch a map or a point's time series without
   reading whole shards. Without `--dask` there is no rechunking or sharding.

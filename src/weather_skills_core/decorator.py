@@ -260,11 +260,21 @@ def write_output(value, out_path, history, first_ds, chunk_bytes=None):
     print(f"Wrote: {out_path}", file=sys.stderr)
 
 
-def _open_zarr(path, io_spec=None, dask=False):
+def _chunk_sizes(ds):
+    """``{dim: chunk sizes}`` of ``ds``'s dask-backed variables (the first to have a dim wins)."""
+    sizes = {}
+    for var in ds.pint.dequantify().variables.values():
+        for dim, chunks in zip(var.dims, var.chunks or (), strict=False):
+            sizes.setdefault(dim, chunks)
+    return sizes
+
+
+def _open_zarr(path, io_spec=None, dask=False, like=None):
     """Open, validate, and quantify one Zarr store.
 
     Numpy-backed unless ``dask`` is set (xarray would otherwise chunk with dask
-    whenever it is installed).
+    whenever it is installed). With ``dask``, a dim that ``like`` (a ``_chunk_sizes``
+    result) also has, at the same length, takes its chunks; other dims are ``"auto"``.
     """
     if not path.exists():
         raise UsageError(f"input not found: {path}")
@@ -273,7 +283,6 @@ def _open_zarr(path, io_spec=None, dask=False):
     from weather_skills_core.standard_utils import normalize_latlon_coords, normalize_step_coord
     from weather_skills_core.units import normalize_unit_strings, quantify_dataset
 
-    chunks = "auto" if dask else None
     if path.is_file():
         import zipfile
 
@@ -287,9 +296,14 @@ def _open_zarr(path, io_spec=None, dask=False):
             raise UsageError(f"{path} is a file, not a Zarr store (a folder or a zipped Zarr)")
         store, group = provenance_mod.zipped_zarr(path)
         # Unconsolidated: consolidated reads miss a store one folder down in the zip.
-        ds = xr.open_zarr(store, group=group, consolidated=False, chunks=chunks)
+        source, kwargs = store, {"group": group, "consolidated": False}
     else:
-        ds = xr.open_zarr(path, consolidated=True, chunks=chunks)
+        source, kwargs = path, {"consolidated": True}
+    chunks = "auto" if dask else None
+    if like:
+        sizes = xr.open_zarr(source, chunks=None, **kwargs).sizes
+        chunks = {d: like[d] if sum(like.get(d, ())) == n else "auto" for d, n in sizes.items()}
+    ds = xr.open_zarr(source, chunks=chunks, **kwargs)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))
     ds = normalize_unit_strings(ds)
@@ -305,17 +319,22 @@ def open_dataset_params(params, arguments, dask=False):
 
     Values (or list items) that expose ``zarr_paths() -> list[Path]`` are also
     opened and hashed. Identical paths are opened once and reused. Each holder
-    gets ``.ds`` (one path) or ``.datasets`` (several).
+    gets ``.ds`` (one path) or ``.datasets`` (several). With ``dask``, every input
+    after the first opens with the first input's chunk sizes on the dims they share
+    (same length), so combining inputs elementwise stays blockwise.
     """
     input_paths: list[Path] = []
     upstream: list = []
     cache: dict = {}
+    like: dict = {}
 
     def open_one(path, io_spec=None):
         path = Path(path)
         resolved = path.resolve()
         if resolved not in cache:
-            cache[resolved] = _open_zarr(path, io_spec, dask)
+            cache[resolved] = _open_zarr(path, io_spec, dask, like)
+            if dask and not like:
+                like.update(_chunk_sizes(cache[resolved]))
             input_paths.append(path)
             upstream.append(provenance_mod.load_history(path))
         ds = cache[resolved]
