@@ -61,6 +61,7 @@ The authoring guide covers the rest:
 | What should a flag be called, and which flags are parsed for me? | [`CONVENTIONS.md`](docs/weather-skill-authoring/references/CONVENTIONS.md) |
 | What dims must a Zarr have, and what is written on output? | [`STANDARD_DATASET.md`](docs/weather-skill-authoring/references/STANDARD_DATASET.md) |
 | Rates vs totals, and which unit attrs to stamp? | [`UNITS.md`](docs/weather-skill-authoring/references/UNITS.md) |
+| How does a skill handle data bigger than memory (`--dask`)? | [`SKILL.md`](docs/weather-skill-authoring/SKILL.md#larger-than-memory-data) |
 
 ## Install
 

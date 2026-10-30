@@ -55,7 +55,7 @@ def test_parser_basic_flags():
         return ds
 
     dests = {a.dest for a in skill.parser._actions if a.dest != "help"}
-    assert dests == {"input", "output", "bbox"}
+    assert dests == {"input", "output", "bbox", "dask", "dask_workers", "dask_chunk_size"}
 
 
 def test_argv_has_option():

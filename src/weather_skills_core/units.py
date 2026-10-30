@@ -538,6 +538,11 @@ def dequantify_dataset(ds):
     return out
 
 
+def _as_array(values):
+    """``np.asarray``, except a dask array stays lazy."""
+    return values if hasattr(values, "chunks") else np.asarray(values)
+
+
 def convert_values(values, src_units: str, dst_units: str):
     """Convert array values with pint (CF strings via cf_xarray.units).
 
@@ -546,17 +551,17 @@ def convert_values(values, src_units: str, dst_units: str):
     to depth (``mm``) and flux (``kg m-2 s-1``) to depth rate (``mm day-1``).
 
     Returns ``(converted_array, density_converted)`` where the flag is True when
-    the density step was required.
+    the density step was required. A dask array stays lazy.
     """
-    q = ureg.Quantity(np.asarray(values), src_units)
+    q = ureg.Quantity(_as_array(values), src_units)
     try:
-        return np.asarray(q.to(dst_units).magnitude), False
+        return _as_array(q.to(dst_units).magnitude), False
     except pint_xarray.pint.DimensionalityError:
         pass
     rho = water_density()
     for density_scaled in (q / rho, q * rho):
         try:
-            return np.asarray(density_scaled.to(dst_units).magnitude), True
+            return _as_array(density_scaled.to(dst_units).magnitude), True
         except pint_xarray.pint.DimensionalityError:
             continue
     raise UsageError(f"{src_units!r} not convertible to {dst_units!r}")
@@ -605,7 +610,7 @@ def convert_dataarray(da, dst_units: str):
         converted = converted.astype(keep) if keep else converted
         if quantified_in:
             return da.copy(data=converted), True
-        out = da.copy(data=np.asarray(converted.magnitude))
+        out = da.copy(data=_as_array(converted.magnitude))
         out.attrs = {**da.attrs, "units": dst_units}
         return out, True
     raise UsageError(f"{variable_units(da)!r} not convertible to {dst_units!r}")
@@ -925,26 +930,22 @@ def deaccumulate_along_step(ds, names=None):
             raise UsageError(f"'{name}' looks like a rate; refuse to deaccumulate")
         plain = da.pint.dequantify() if da.pint.units is not None else da
         src_units = plain.attrs.get("units") or units
-        left = plain.isel(step=slice(0, -1))
-        diffs = np.clip(
-            plain.isel(step=slice(1, None)).values - left.values,
-            a_min=0,
-            a_max=None,
-        )
+        # Each interval keeps its left step's label; negative diffs (a reset) become 0.
+        diffs = plain.diff("step", label="lower").clip(min=0)
         kind = classify_variable(name, units=src_units, standard_name=std)
         if kind is None and isinstance(src_units, str) and src_units.strip():
             kind = kind_from_units(src_units)
         attrs = dict(plain.attrs)
         if kind == "precip_amount":
-            if "step" not in left.dims:
+            if "step" not in diffs.dims:
                 raise UsageError(f"variable {name!r} has no step dim")
-            mm, _ = convert_values(diffs, src_units, STANDARD["precip_amount"]["units"])
-            rate = mm / _broadcast_along_step(delta_days, left.dims)
-            diffed = left.copy(data=rate)
+            mm, _ = convert_values(diffs.data, src_units, STANDARD["precip_amount"]["units"])
+            rate = mm / _broadcast_along_step(delta_days, diffs.dims)
+            diffed = diffs.copy(data=rate)
             attrs["units"] = STANDARD["precip"]["units"]
             attrs["standard_name"] = STANDARD["precip"]["standard_name"]
         else:
-            diffed = left.copy(data=diffs)
+            diffed = diffs
         diffed.attrs = attrs
         out[name] = diffed
     if had_valid and "valid_time" in out.variables:

@@ -12,7 +12,7 @@ This file is the naming contract. Dims and Zarr shapes live in
 
 | Kind | Who owns it | Examples |
 | --- | --- | --- |
-| Decorator-owned | `@weather_skill` adds it. Do not declare it. | `-o` / `--output` |
+| Decorator-owned | `@weather_skill` adds it. Do not declare it. | `-o` / `--output`, `--dask`, `--dask-workers`, `--dask-chunk-size` |
 | Canonical special | You declare it with the exact flags below. The decorator parses the string. | `--bbox`, `--date`, `--start-time`, `--end-time`, `--variable` / `-v` |
 | Everything else | Ordinary `argparse`. Reuse an existing name when the meaning matches. | `--input` / `-i`, `--geojson`, `--title` |
 
@@ -76,6 +76,10 @@ Consumer skills take `--bbox`. Polygon clipping is skill-specific
 - One Zarr input: `-i` / `--input`. Inputs with different roles get a flag
   each, named by role (`--forecast`, `--obs`).
 - Output: `-o` / `--output`, added by the decorator.
+- Larger-than-memory mode: `--dask`, `--dask-workers`, `--dask-chunk-size`,
+  added by the decorator; the skill receives their values as the `dask`,
+  `dask_workers` and `dask_chunk_size` kwargs. See
+  [the authoring guide](../SKILL.md#larger-than-memory-data).
 
 How inputs are opened and outputs written is in
 [the authoring guide](../SKILL.md#inputs).
@@ -138,4 +142,4 @@ does not treat them as canonical specials.
 
 | Rule | What it catches |
 | --- | --- |
-| WSK101 | A flag that collides with one core owns: a non-canonical spelling of a special (`-b` for bbox; use `--bbox`), or declaring `-o` / `--output` yourself. |
+| WSK101 | A flag that collides with one core owns: a non-canonical spelling of a special (`-b` for bbox; use `--bbox`), or declaring `-o` / `--output` or a `--dask` flag yourself (read the `dask`, `dask_workers` and `dask_chunk_size` kwargs instead). |

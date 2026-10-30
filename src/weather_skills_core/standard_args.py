@@ -16,6 +16,11 @@ STANDARD_HELP = {
 }
 
 
+# Reserved flags the decorator adds to every skill (like -o/--output).
+DASK_FLAGS = ("--dask", "--dask-workers", "--dask-chunk-size")
+DASK_DESTS = ("dask", "dask_workers", "dask_chunk_size")
+
+
 @dataclass(frozen=True)
 class StandardParameter:
     name: str

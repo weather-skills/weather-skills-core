@@ -1,18 +1,21 @@
 """``@weather_skill`` decorator: CLI, open Dataset inputs, stamp/write outputs."""
 
 import argparse
+import contextlib
 import functools
 import inspect
 import json
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
 
 from weather_skills_core import provenance as provenance_mod
-from weather_skills_core import standard_args
+from weather_skills_core import standard_args, zarr_layout
 from weather_skills_core import standard_dataset as std
 from weather_skills_core.dataset_type import Dataset
-from weather_skills_core.errors import SkillError, UsageError
+from weather_skills_core.errors import DataError, SkillError, UsageError
 
 # xarray, numpy, and pint load inside the functions that use them, so importing
 # a skill (and ``--help`` / usage errors) stays fast.
@@ -144,8 +147,70 @@ def prepare_dataset_output(ds, *, first_ds=None):
     return normalize_latlon_coords(ds)
 
 
-def write_output(value, out_path, history, first_ds):
-    """Write one skill result: stamp a returned Path, or ``to_zarr`` a Dataset."""
+# Network-library errors a lazy source read raises while the output is written, matched
+# by qualified name so none of those libraries has to be imported.
+SOURCE_READ_ERRORS = frozenset(
+    {
+        "aiohttp.client_exceptions.ClientError",  # fsspec HTTP, gcsfs connection errors
+        "gcsfs.retry.HttpError",
+        "requests.exceptions.RequestException",
+    }
+)
+
+
+def source_read_error(exc, out_path):
+    """A ``DataError`` for a network read failure ``exc``, or None for any other exception."""
+    if not SOURCE_READ_ERRORS & {f"{c.__module__}.{c.__qualname__}" for c in type(exc).__mro__}:
+        return None
+    message = f"reading the input data failed while writing {out_path}: {type(exc).__name__}: {exc}"
+    if re.search(r"\b(401|403)\b|Forbidden", str(exc)):
+        message += " (check your credentials and access to the source)"
+    return DataError(message)
+
+
+def _enter_dask(args, exit_stack):
+    """Check the ``--dask`` flags and run under dask; returns the chunk size in bytes.
+
+    Raises UsageError if dask is not installed or ``--dask-chunk-size`` is not a size.
+    """
+    try:
+        import dask
+        from dask.utils import parse_bytes
+    except ImportError:
+        raise UsageError(
+            "--dask needs dask, which this skill does not have; the skill must list "
+            "`weather-skills-core[dask]` in its script header dependencies"
+        ) from None
+    if args.dask_workers < 1:
+        raise UsageError(f"--dask-workers must be at least 1; got {args.dask_workers}")
+    try:
+        chunk_bytes = parse_bytes(args.dask_chunk_size)
+        if chunk_bytes < 1:
+            raise ValueError(args.dask_chunk_size)
+    except ValueError:
+        raise UsageError(
+            f"--dask-chunk-size {args.dask_chunk_size!r} is not a size like 64MiB"
+        ) from None
+    # Activates the threaded scheduler and chunk size for the whole run (open, skill,
+    # write); closing the stack restores the global dask config.
+    exit_stack.enter_context(
+        dask.config.set(
+            scheduler="threads",
+            num_workers=args.dask_workers,
+            **{"array.chunk-size": args.dask_chunk_size},
+        )
+    )
+    return chunk_bytes
+
+
+def write_output(value, out_path, history, first_ds, chunk_bytes=None):
+    """Write one skill result: stamp a returned Path, or ``to_zarr`` a Dataset.
+
+    A Dataset is written to a sibling path and renamed into place, so a failure
+    leaves no partial output and the input may be ``out_path`` itself. With
+    ``chunk_bytes`` (``--dask``), data is rechunked to uniform chunks of about that
+    size and written as a sharded Zarr.
+    """
     if isinstance(value, (str, Path)):
         written = Path(value)
         if written.resolve() != out_path.resolve():
@@ -169,22 +234,48 @@ def write_output(value, out_path, history, first_ds):
         value.attrs = {**first_ds.attrs, **value.attrs}
     value.attrs.pop(INPUT_PATH_ATTR, None)
     provenance_mod.stamp_zarr(value, history)
-    # The wrapper already checked that an existing --output is ours to replace.
-    if out_path.is_dir():
-        shutil.rmtree(out_path)
-    elif out_path.exists():
-        out_path.unlink()
+    encoding = {}
+    if chunk_bytes:
+        value, encoding = zarr_layout.prepare_chunks(value, chunk_bytes)
+    partial = out_path.with_name(f".{out_path.name}.partial")
+    if partial.exists():
+        shutil.rmtree(partial)
     try:
-        value.to_zarr(out_path, mode="w", consolidated=True)
-    except Exception:
-        if out_path.exists():
+        try:
+            value.to_zarr(partial, mode="w", consolidated=True, encoding=encoding)
+        except Exception as exc:
+            error = source_read_error(exc, out_path)
+            if error is None:
+                raise
+            raise error from exc
+        # The wrapper already checked that an existing --output is ours to replace.
+        if out_path.is_dir():
             shutil.rmtree(out_path)
-        raise
+        elif out_path.exists():
+            out_path.unlink()
+        partial.rename(out_path)
+    finally:
+        if partial.exists():
+            shutil.rmtree(partial)
     print(f"Wrote: {out_path}", file=sys.stderr)
 
 
-def _open_zarr(path, io_spec=None):
-    """Open, validate, and quantify one Zarr store."""
+def _chunk_sizes(ds):
+    """``{dim: chunk sizes}`` of ``ds``'s dask-backed variables (the first to have a dim wins)."""
+    sizes = {}
+    for var in ds.pint.dequantify().variables.values():
+        for dim, chunks in zip(var.dims, var.chunks or (), strict=False):
+            sizes.setdefault(dim, chunks)
+    return sizes
+
+
+def _open_zarr(path, io_spec=None, dask=False, like=None):
+    """Open, validate, and quantify one Zarr store.
+
+    Numpy-backed unless ``dask`` is set (xarray would otherwise chunk with dask
+    whenever it is installed). With ``dask``, a dim that ``like`` (a ``_chunk_sizes``
+    result) also has, at the same length, takes its chunks; other dims are ``"auto"``.
+    """
     if not path.exists():
         raise UsageError(f"input not found: {path}")
     import xarray as xr
@@ -205,9 +296,14 @@ def _open_zarr(path, io_spec=None):
             raise UsageError(f"{path} is a file, not a Zarr store (a folder or a zipped Zarr)")
         store, group = provenance_mod.zipped_zarr(path)
         # Unconsolidated: consolidated reads miss a store one folder down in the zip.
-        ds = xr.open_zarr(store, group=group, consolidated=False)
+        source, kwargs = store, {"group": group, "consolidated": False}
     else:
-        ds = xr.open_zarr(path, consolidated=True)
+        source, kwargs = path, {"consolidated": True}
+    chunks = "auto" if dask else None
+    if like:
+        sizes = xr.open_zarr(source, chunks=None, **kwargs).sizes
+        chunks = {d: like[d] if sum(like.get(d, ())) == n else "auto" for d, n in sizes.items()}
+    ds = xr.open_zarr(source, chunks=chunks, **kwargs)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))
     ds = normalize_unit_strings(ds)
@@ -218,22 +314,27 @@ def _open_zarr(path, io_spec=None):
     return quantify_dataset(ds)
 
 
-def open_dataset_params(params, arguments):
+def open_dataset_params(params, arguments, dask=False):
     """Replace Dataset-typed Path values with opened/validated/quantified datasets.
 
     Values (or list items) that expose ``zarr_paths() -> list[Path]`` are also
     opened and hashed. Identical paths are opened once and reused. Each holder
-    gets ``.ds`` (one path) or ``.datasets`` (several).
+    gets ``.ds`` (one path) or ``.datasets`` (several). With ``dask``, every input
+    after the first opens with the first input's chunk sizes on the dims they share
+    (same length), so combining inputs elementwise stays blockwise.
     """
     input_paths: list[Path] = []
     upstream: list = []
     cache: dict = {}
+    like: dict = {}
 
     def open_one(path, io_spec=None):
         path = Path(path)
         resolved = path.resolve()
         if resolved not in cache:
-            cache[resolved] = _open_zarr(path, io_spec)
+            cache[resolved] = _open_zarr(path, io_spec, dask, like)
+            if dask and not like:
+                like.update(_chunk_sizes(cache[resolved]))
             input_paths.append(path)
             upstream.append(provenance_mod.load_history(path))
         ds = cache[resolved]
@@ -302,6 +403,30 @@ def weather_skill(
     (skill already wrote). Set ``output=False`` for inspect-only skills.
     ``probe=True`` on an argument drops required flags and skips writing.
 
+    The decorator also owns ``--dask``, ``--dask-workers N`` (default
+    min(4, CPUs)) and ``--dask-chunk-size SIZE`` (default 64MiB) on every skill
+    (do not declare them); the skill receives them as the plain kwargs ``dask``
+    (bool), ``dask_workers`` (int) and ``dask_chunk_size`` (str). With ``--dask``
+    the run uses dask's threaded scheduler, inputs open in dask chunks, and a
+    skill that must handle data larger than memory opens its remote sources with
+    ``chunks="auto" if dask else None`` and keeps arrays lazy; the result is
+    rechunked uniformly and written as a sharded Zarr v3 (shards near the chunk
+    size, ~1 MiB inner chunks). Without ``--dask``, inputs are numpy-backed and
+    the write has no sharding or rechunking. ``--dask`` needs the skill to list
+    ``weather-skills-core[dask]`` in its script header (else a usage error); the
+    other two flags are unused without it.
+
+    Every Dataset is written to a sibling path renamed into place, so a failure
+    leaves no partial output. A network error raised while writing (a lazy read
+    of the source: aiohttp, gcsfs or requests) is reported as a ``DataError``
+    naming the output.
+
+    The skill also receives ``exit_stack``, a ``contextlib.ExitStack`` closed
+    after every output is written (or the run fails), with or without ``--dask``.
+    Lazy data that depends on a temp dir or session registers it there:
+    ``exit_stack.enter_context(tempfile.TemporaryDirectory())``,
+    ``exit_stack.callback(fs.close)``.
+
     Skills open precip rates and amounts alike. The operation that cannot take
     amounts is ``rate_to_total`` (used by ``convert-to-totals``): multiplying
     an amount by ``aggregation_period`` would double-count.
@@ -328,6 +453,11 @@ def weather_skill(
                     f"skill {name!r}: do not declare -o/--output; the decorator owns it "
                     "(pass output=False to opt out)"
                 )
+            if set(standard_args.DASK_FLAGS) & flags or arg.dest in standard_args.DASK_DESTS:
+                raise ValueError(
+                    f"skill {name!r}: do not declare --dask/--dask-workers/--dask-chunk-size; "
+                    "the decorator owns them"
+                )
 
         if not any(
             p.kind == inspect.Parameter.VAR_KEYWORD
@@ -352,6 +482,24 @@ def weather_skill(
                 metavar="PATH",
                 help="Output path (repeat once per returned artifact).",
             )
+        parser.add_argument(
+            "--dask",
+            action="store_true",
+            help="Process data larger than memory in chunks (threaded dask).",
+        )
+        parser.add_argument(
+            "--dask-workers",
+            type=int,
+            default=min(4, os.cpu_count() or 1),
+            metavar="N",
+            help="Dask worker threads (default: %(default)s; needs --dask).",
+        )
+        parser.add_argument(
+            "--dask-chunk-size",
+            default="64MiB",
+            metavar="SIZE",
+            help="Target dask chunk size (default: %(default)s; needs --dask).",
+        )
         for arg in arguments:
             kwargs = dict(arg.kwargs)
             if arg.dataset_type is not None:
@@ -367,7 +515,8 @@ def weather_skill(
                 )
             parser.add_argument(*arg.option_strings, **kwargs)
 
-        strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
+        strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None}
+        strip_dests |= {"output", *standard_args.DASK_DESTS}
         # Options taking one value (store/append), for rewrite_negative_values.
         value_options = {
             opt
@@ -380,6 +529,8 @@ def weather_skill(
         def wrapper(argv=None):
             argv = sys.argv[1:] if argv is None else list(argv)
             argv = standard_args.rewrite_negative_values(argv, value_options)
+            # Closed after every output is written, or the run fails.
+            exit_stack = contextlib.ExitStack()
 
             try:
                 probing = any(
@@ -394,8 +545,11 @@ def weather_skill(
                 finally:
                     for action, required in saved_required:
                         action.required = required
+                chunk_bytes = _enter_dask(args, exit_stack) if args.dask else None
                 params = standard_args.convert_standard_args(args, arguments)
-                params, input_paths, upstream, first_ds = open_dataset_params(params, arguments)
+                params, input_paths, upstream, first_ds = open_dataset_params(
+                    params, arguments, args.dask
+                )
                 if (
                     any(a.dataset_type is not None and a.dest == "input" for a in arguments)
                     and "input" in params
@@ -435,6 +589,10 @@ def weather_skill(
                             output_paths[0] if len(output_paths) == 1 else output_paths
                         )
 
+                params["dask"] = args.dask
+                params["dask_workers"] = args.dask_workers
+                params["dask_chunk_size"] = args.dask_chunk_size
+                params["exit_stack"] = exit_stack
                 result = fn(**params)
                 if not output or probing or result is None:
                     return result
@@ -457,12 +615,14 @@ def weather_skill(
                     revision=provenance_mod.resolve_skill_revision(fn),
                 )
                 for value, out_path in zip(results, output_paths, strict=True):
-                    write_output(value, out_path, history, first_ds)
+                    write_output(value, out_path, history, first_ds, chunk_bytes)
                 return result
             except SkillError as exc:
                 msg = str(exc)
                 print(msg if not exc.prefix else f"Error: {msg}", file=sys.stderr)
                 sys.exit(exc.exit_code)
+            finally:
+                exit_stack.close()
 
         wrapper.parser = parser
         return wrapper

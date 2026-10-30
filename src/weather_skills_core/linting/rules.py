@@ -22,7 +22,12 @@ from pathlib import Path
 import yaml
 
 from weather_skills_core.linting.extract import SkillDeclaration, normalize_requirement_name
-from weather_skills_core.standard_args import StandardParameter, standard_parameters
+from weather_skills_core.standard_args import (
+    DASK_DESTS,
+    DASK_FLAGS,
+    StandardParameter,
+    standard_parameters,
+)
 
 CORE_PACKAGE = "weather-skills-core"
 
@@ -95,9 +100,9 @@ def _standard_lookup() -> dict[str, StandardParameter]:
 def _rule_shadow(decl: SkillDeclaration) -> list[Finding]:
     """Flag arguments that collide with flags core owns.
 
-    That is ``-o``/``--output`` (the decorator adds it unless ``output=False``)
-    and non-canonical spellings of the standard parameters (bbox/date/…).
-    Input flags are free-form.
+    That is ``-o``/``--output`` (the decorator adds it unless ``output=False``),
+    the ``--dask`` flags (always added), and non-canonical spellings of the
+    standard parameters (bbox/date/…). Input flags are free-form.
     """
     findings = []
     lookup = _standard_lookup()
@@ -110,6 +115,18 @@ def _rule_shadow(decl: SkillDeclaration) -> list[Finding]:
                     shape.identity,
                     "the decorator owns -o/--output; drop this argument "
                     "(or pass output=False to the decorator to opt out).",
+                )
+            )
+            continue
+        if set(DASK_FLAGS) & set(shape.flags) or shape.dest in DASK_DESTS:
+            findings.append(
+                _finding(
+                    "WSK101",
+                    decl,
+                    shape.identity,
+                    "the decorator owns --dask/--dask-workers/--dask-chunk-size and passes "
+                    "their values to the skill as the `dask`, `dask_workers` and "
+                    "`dask_chunk_size` kwargs; drop this argument and read those instead.",
                 )
             )
             continue
@@ -201,6 +218,8 @@ def _declared_flags(decl: SkillDeclaration) -> tuple[dict[str, str], set[str]]:
     if decl.has_output:
         primary.setdefault("--output", "decorator output=")
         all_spellings.update(("--output", "-o"))
+    # Always present, so SKILL.md may document them but need not.
+    all_spellings.update(DASK_FLAGS)
     return primary, all_spellings
 
 
