@@ -5,7 +5,6 @@ import contextlib
 import functools
 import inspect
 import json
-import math
 import os
 import re
 import shutil
@@ -270,41 +269,12 @@ def _chunk_sizes(ds):
     return sizes
 
 
-def _dask_chunks(stored, like):
-    """Dask chunks for opening ``stored`` (a Dataset opened with ``chunks=None``).
-
-    Dask chunks never split a stored chunk, since each piece would re-read and decode
-    all of it. Where the stored chunks of the largest variable already reach the chunk
-    size, a dim keeps its stored chunk size; otherwise it is ``"auto"``, which merges
-    stored chunks up to the target in whole multiples. A dim ``like`` (a ``_chunk_sizes``
-    result) also has, at the same length, takes its chunks if they are whole multiples
-    of the stored ones.
-    """
-    import dask
-    from dask.utils import parse_bytes
-
-    var = max(stored.data_vars.values(), key=lambda v: v.nbytes, default=None)
-    chunks = var.encoding.get("chunks") if var is not None else None
-    sizes = dict(zip(var.dims, chunks, strict=True)) if chunks else {}
-    big = math.prod(sizes.values()) * var.dtype.itemsize >= parse_bytes(
-        dask.config.get("array.chunk-size")
-    )
-    out = {}
-    for dim, length in stored.sizes.items():
-        unit = sizes.get(dim, 1)
-        aligned = like.get(dim, ())
-        if sum(aligned) == length and all(c % unit == 0 for c in aligned[:-1]):
-            out[dim] = aligned
-        else:
-            out[dim] = min(unit, length) if big and dim in sizes else "auto"
-    return out
-
-
 def _open_zarr(path, io_spec=None, dask=False, like=None):
     """Open, validate, and quantify one Zarr store.
 
     Numpy-backed unless ``dask`` is set (xarray would otherwise chunk with dask
-    whenever it is installed). With ``dask``, see ``_dask_chunks`` for the chunks.
+    whenever it is installed). With ``dask``, a dim that ``like`` (a ``_chunk_sizes``
+    result) also has, at the same length, takes its chunks; other dims are ``"auto"``.
     """
     if not path.exists():
         raise UsageError(f"input not found: {path}")
@@ -329,9 +299,10 @@ def _open_zarr(path, io_spec=None, dask=False, like=None):
         source, kwargs = store, {"group": group, "consolidated": False}
     else:
         source, kwargs = path, {"consolidated": True}
-    chunks = None
-    if dask:
-        chunks = _dask_chunks(xr.open_zarr(source, chunks=None, **kwargs), like or {})
+    chunks = "auto" if dask else None
+    if like:
+        sizes = xr.open_zarr(source, chunks=None, **kwargs).sizes
+        chunks = {d: like[d] if sum(like.get(d, ())) == n else "auto" for d, n in sizes.items()}
     ds = xr.open_zarr(source, chunks=chunks, **kwargs)
     if io_spec is not None:
         std.validate_input(ds, io_spec, str(path))

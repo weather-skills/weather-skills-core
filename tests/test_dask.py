@@ -245,25 +245,6 @@ def test_inputs_share_the_first_inputs_chunks_on_shared_dims(tmp_path):
     assert third["latitude"] == first["latitude"]
 
 
-def test_aligned_chunks_give_way_to_whole_stored_chunks(tmp_path):
-    first, second = _chunksizes(_store(tmp_path / "a.zarr", 5), _store(tmp_path / "b.zarr", 8))
-    assert first["time"][0] % 5 == 0 and second["time"][0] % 8 == 0
-
-
-def test_dask_chunks_are_whole_multiples_of_a_stored_chunk_above_the_target(tmp_path):
-    """A stored chunk bigger than --dask-chunk-size is never split into pieces."""
-    lats = tuple(float(x) for x in range(1, 41))
-    lons = tuple(float(x) for x in range(10, 50))
-    big = _store(tmp_path / "big.zarr", 2, n_time=4, lats=lats, lons=lons)  # (2, 40, 40) chunks
-    assert zarr.open_group(big, mode="r")["precip"].chunks == (2, 40, 40)
-    # xarray's own "auto" would cut each stored chunk into 11-row, 11-column pieces here.
-    (chunks,) = _chunksizes(big)
-    assert dict(chunks) == {"time": (2, 2), "latitude": (40,), "longitude": (40,)}
-    # Stored chunks below the target are merged, in whole multiples.
-    (chunks,) = _chunksizes(_store(tmp_path / "small.zarr", 3), flags=["--dask"])
-    assert all(c % 3 == 0 for c in chunks["time"][:-1])
-
-
 @pytest.mark.parametrize(
     ("shape", "chunks", "expected"),
     [
