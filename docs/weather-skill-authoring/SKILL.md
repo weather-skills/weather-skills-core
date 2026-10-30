@@ -127,8 +127,17 @@ Every skill has `--dask`, `--dask-workers N` (default `min(4, CPUs)`) and
 `--dask-chunk-size SIZE` (default `64MiB`); the decorator owns them. With
 `--dask` the run uses dask's threaded scheduler: inputs open in chunks, the
 skill builds a lazy result, and the decorator streams it to the output Zarr
-chunk by chunk. Peak memory is roughly workers × 3–4 × chunk size, not the
-size of the data. Without `--dask`, inputs open as plain numpy-backed arrays.
+chunk by chunk. Peak memory is roughly workers × 3–4 × max(stored chunk,
+chunk size), not the size of the data. Without `--dask`, inputs open as plain
+numpy-backed arrays.
+
+A dask chunk never splits a stored chunk: each piece would re-read and decode
+the whole stored chunk (a 125 MiB stored chunk cut into pieces took over 30
+minutes; opened whole it took seconds). Inputs open with their stored chunks
+when those already reach `--dask-chunk-size`, else with `"auto"`, which merges
+small stored chunks up to the target in whole multiples. Inputs after the
+first follow the first input's chunks on shared dims, unless that would split
+a stored chunk.
 
 A skill opts in by listing the extra in its header; `--dask` on a skill
 without it exits with a usage error naming the extra:
@@ -161,8 +170,10 @@ full-size data into memory before returning:
 - For a check or a message that needs data values, reduce first and compute
   the small results together: `xr.Dataset({...}).compute()`. Each compute
   reads the input once, so batch them.
-- Fetchers open remote stores with `chunks="auto" if dask else None` and
-  keep `.load()` for the path without dask. A source of one file per day or
+- Fetchers open remote stores with `chunks=None` without dask. With dask,
+  never split the source's stored chunks: open with `chunks={}` (the stored
+  chunks) when they are already at least `--dask-chunk-size`, else with
+  `chunks="auto"`. Keep `.load()` for the path without dask. A source of one file per day or
   granule becomes one `dask.delayed` task per file that downloads, cuts to
   the bbox and returns an array (`dask.array.from_delayed`). Import dask
   inside that branch only, so `--help` never imports it.

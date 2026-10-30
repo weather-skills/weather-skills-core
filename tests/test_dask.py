@@ -210,14 +210,17 @@ def test_run_without_the_flag_writes_as_before(tmp_path, monkeypatch):
     xr.testing.assert_equal(xr.open_zarr(out, chunks=None).load(), make_gridded(n_time=40))
 
 
-def test_inputs_share_the_first_inputs_chunks_on_shared_dims(tmp_path):
-    grid = dict(n_time=40, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0))
-    a = make_gridded(**grid).chunk(time=5)
-    b = make_gridded(**grid).chunk(time=8)
-    a.to_zarr(tmp_path / "a.zarr", mode="w", consolidated=True)
-    b.to_zarr(tmp_path / "b.zarr", mode="w", consolidated=True)
-    short = make_gridded(n_time=7, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0))
-    short.to_zarr(tmp_path / "short.zarr", mode="w", consolidated=True)
+GRID = dict(n_time=40, lats=(1.0, 2.0, 3.0), lons=(10.0, 11.0, 12.0))
+
+
+def _store(path, time_chunks, **grid):
+    make_gridded(**(grid or GRID)).chunk(time=time_chunks, latitude=-1, longitude=-1).to_zarr(
+        path, mode="w", consolidated=True
+    )
+    return str(path)
+
+
+def _chunksizes(*paths, flags=("--dask", "--dask-chunk-size", "1KiB")):
     seen = []
 
     @weather_skill(name="pair", version="0.1.0", output=False)
@@ -227,13 +230,38 @@ def test_inputs_share_the_first_inputs_chunks_on_shared_dims(tmp_path):
     def pair(ds, **kwargs):
         seen.extend(d.pint.dequantify().chunksizes for d in ds)
 
-    inputs = [x for p in ("a", "b", "short") for x in ("-i", str(tmp_path / f"{p}.zarr"))]
-    pair(inputs + ["--dask", "--dask-chunk-size", "1KiB"])
-    first, second, third = seen
-    assert first["time"][0] % 5 == 0 and first["time"][0] % 8 != 0
-    assert second == first  # b is stored in chunks of 8, but follows the first input
+    pair([x for p in paths for x in ("-i", p)] + list(flags))
+    return seen
+
+
+def test_inputs_share_the_first_inputs_chunks_on_shared_dims(tmp_path):
+    a = _store(tmp_path / "a.zarr", 5)
+    b = _store(tmp_path / "b.zarr", 1)
+    short = _store(tmp_path / "short.zarr", 7, n_time=7, lats=GRID["lats"], lons=GRID["lons"])
+    first, second, third = _chunksizes(a, b, short)
+    assert second == first
+    assert _chunksizes(b)[0]["time"] != first["time"]  # b alone would chunk differently
     assert third["time"] != first["time"]  # a different length keeps its own chunks
     assert third["latitude"] == first["latitude"]
+
+
+def test_aligned_chunks_give_way_to_whole_stored_chunks(tmp_path):
+    first, second = _chunksizes(_store(tmp_path / "a.zarr", 5), _store(tmp_path / "b.zarr", 8))
+    assert first["time"][0] % 5 == 0 and second["time"][0] % 8 == 0
+
+
+def test_dask_chunks_are_whole_multiples_of_a_stored_chunk_above_the_target(tmp_path):
+    """A stored chunk bigger than --dask-chunk-size is never split into pieces."""
+    lats = tuple(float(x) for x in range(1, 41))
+    lons = tuple(float(x) for x in range(10, 50))
+    big = _store(tmp_path / "big.zarr", 2, n_time=4, lats=lats, lons=lons)  # (2, 40, 40) chunks
+    assert zarr.open_group(big, mode="r")["precip"].chunks == (2, 40, 40)
+    # xarray's own "auto" would cut each stored chunk into 11-row, 11-column pieces here.
+    (chunks,) = _chunksizes(big)
+    assert dict(chunks) == {"time": (2, 2), "latitude": (40,), "longitude": (40,)}
+    # Stored chunks below the target are merged, in whole multiples.
+    (chunks,) = _chunksizes(_store(tmp_path / "small.zarr", 3), flags=["--dask"])
+    assert all(c % 3 == 0 for c in chunks["time"][:-1])
 
 
 @pytest.mark.parametrize(
