@@ -85,6 +85,17 @@ def test_classify_variable():
     assert classify_variable("precipitation_quality_index_surface", units="1") is None
     assert classify_variable("precipitation_surface", units="kg m-2 s-1") == "precip"
     assert classify_variable("precipitation_surface", units="mm/h") == "precip"
+    # Hints match whole "_" words, not any prefix or suffix.
+    assert classify_variable("precip_anomaly", units="mm day-1") == "precip"
+    assert classify_variable("total_precipitation_6hr", units="m") == "precip_amount"
+    assert classify_variable("tasmax", units="K") == "temp"
+    assert classify_variable("precipitable_water_atmosphere", units="kg m-2") is None
+    assert classify_variable("total_precipitable_water", units="kg m-2") is None
+    assert classify_variable("prw", units="kg m-2") is None
+    assert classify_variable("prsn", units="kg m-2 s-1") is None
+    assert classify_variable("probability_matched_mean_echo_top", units="m") is None
+    assert classify_variable("temperature_850hpa_standard_deviation", units="K") is None
+    assert classify_variable("skin_temperature", units="K") is None
     # Not air / 2 m temperature
     assert classify_variable("sst", units="K", standard_name="sea_surface_temperature") is None
     assert classify_variable("d2m", units="K", standard_name="dew_point_temperature") is None
