@@ -544,6 +544,167 @@ def latitude_weights(lats):
     return weights / weights.mean()
 
 
+# Calendar labels along time that calendar_labels builds.
+TIME_LABELS = ("month", "year", "dayofyear", "month_group")
+
+
+def calendar_labels(times, month_groups=()):
+    """The calendar labels of each time: month, day of year, month group, and year.
+
+    ``times`` is a pandas DatetimeIndex or a CFTimeIndex. ``month_groups`` are runs of
+    uppercase month initials (``MAM``, ``OND``, ``DJF``) that share no month.
+
+    Returns a dict of int or str numpy arrays, one value per time:
+
+    - ``month``: 1-12.
+    - ``dayofyear``: 1-366.
+    - ``month_group``: the group holding the time's month, or ``""``.
+    - ``year``: the calendar year, except that a group crossing December takes the
+      year it begins (Dec 2023 to Feb 2024 are ``DJF`` of 2023).
+
+    Raises UsageError for a group that is not exactly one run of months, or groups
+    that share a month.
+    """
+    import numpy as np
+
+    month = np.asarray(times.month, dtype=np.int64)
+    group = np.full(month.shape, "", dtype=object)
+    begins_last_year = np.zeros(month.shape, dtype=bool)
+    taken = set()
+    for token in month_groups:
+        starts = [
+            start
+            for start in range(12)
+            if len(token) <= 12
+            and all("JFMAMJJASOND"[(start + i) % 12] == c for i, c in enumerate(token))
+        ]
+        if not token or len(starts) != 1:
+            why = "matches more than one run of months" if token and starts else "is not a run"
+            raise UsageError(
+                f"month group {token!r} {why}; use uppercase month initials like MAM, OND or DJF"
+            )
+        months = [(starts[0] + i) % 12 + 1 for i in range(len(token))]
+        if taken & set(months):
+            raise UsageError(f"month groups share a month ({','.join(month_groups)})")
+        taken |= set(months)
+        in_group = np.isin(month, months)
+        group[in_group] = token
+        begins_last_year |= in_group & (month < months[0])
+    return {
+        "month": month,
+        "dayofyear": np.asarray(times.day_of_year, dtype=np.int64),
+        "year": np.asarray(times.year, dtype=np.int64) - begins_last_year,
+        "month_group": group.astype(str),
+    }
+
+
+def calendar_expected_steps(times, period, labels, month_groups=()):
+    """How many steps each complete calendar group holds at the data's time step.
+
+    A group is one combination of calendar labels (``{"year": ..., "month_group": ...}``,
+    each an array along ``times`` as ``calendar_labels`` builds it). A complete group
+    holds every step of each calendar run the data touch: one MAM, one March, one year.
+    So a season cut by the start or end of the record, or a March with missing days,
+    holds fewer steps than this count.
+
+    Args:
+        times: The data's pandas DatetimeIndex or CFTimeIndex, possibly with gaps.
+        period: The data's step: a duration (``1 day``, ``6 hour``, ``7 day``), a calendar
+            step (``1 month``, ``3 month``, ``1 year``), or ``1 dekad`` (days 1, 11, 21).
+        labels: Label name (one of ``TIME_LABELS``) to its values along ``times``.
+        month_groups: The month groups the labels were built with (``MAM``, ``DJF``); a
+            ``year`` label depends on them.
+
+    Returns:
+        Dict from a tuple of label values (in ``labels`` order) to its expected steps.
+
+    Raises:
+        UsageError: a repeated time; times off a regular ``period`` axis; labels that are
+            not the calendar labels of their times; a step longer than a day that runs
+            into the next group (a week from 27 May under ``MAM``); a group lasting over a
+            year.
+    """
+    import datetime
+    import re
+    from collections import Counter
+
+    import numpy as np
+    import pandas as pd
+    import xarray as xr
+
+    from weather_skills_core.units import parse_aggregation_period
+
+    if not times.is_unique:
+        raise UsageError(
+            f"time {times[times.duplicated()][0]} appears more than once, so its values "
+            "would count twice toward a time group; drop the repeated steps first"
+        )
+    # Rebuild the labels on a gap-free axis at the data's step, reaching a year past
+    # both ends, so every calendar run the data touch is whole.
+    first = times[0]
+    calendar = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
+    if calendar or period.strip() == "1 dekad":
+        # Calendar steps: labels must be month starts (dekads on days 1, 11, 21).
+        every = (
+            int(calendar.group(1)) * (12 if calendar.group(2) == "year" else 1) if calendar else 1
+        )
+        n = (times[-1].year - first.year) * 12 + times[-1].month - first.month
+        full = [
+            first.replace(
+                year=first.year + (first.month - 1 + k) // 12,
+                month=(first.month - 1 + k) % 12 + 1,
+                day=day,
+            )
+            for k in range(-24, n + 25)
+            if k % every == 0
+            for day in ((1,) if calendar else (1, 11, 21))
+        ]
+        longer_than_a_day = True
+    else:
+        step = parse_aggregation_period(period)
+        step = datetime.timedelta(seconds=float(step.to("second").magnitude))
+        margin = int(np.ceil(datetime.timedelta(days=366) / step))
+        n = round((times[-1] - first) / step)
+        full = [first + i * step for i in range(-margin, n + margin + 1)]
+        longer_than_a_day = step > datetime.timedelta(days=1)
+    full = pd.DatetimeIndex(full) if isinstance(times, pd.DatetimeIndex) else xr.CFTimeIndex(full)
+    at = full.get_indexer(times)
+    if (at < 0).any():
+        raise UsageError(
+            f"time values do not fall on a regular {period} axis, so the steps "
+            "each time group should hold cannot be counted"
+        )
+    rebuilt = calendar_labels(full, month_groups)
+    # Labels at each step's last second, to catch a step (a week from 27 May) that runs
+    # into the next group. A step of a day or less belongs to the day it is stamped on.
+    rebuilt_end = calendar_labels(full[1:] - datetime.timedelta(seconds=1), month_groups)
+    change = np.zeros(full.size, dtype=bool)
+    grouped = np.ones(full.size, dtype=bool)
+    for name, values in labels.items():
+        if not np.array_equal(rebuilt[name][at], values):
+            raise UsageError(
+                f"{name!r} does not hold the calendar {name} of each time step, as "
+                "calendar_labels builds it, so its full calendar period is unknown"
+            )
+        crossing = rebuilt[name][at] != rebuilt_end[name][at]
+        if longer_than_a_day and crossing.any():
+            raise UsageError(
+                f"the {period} step starting {times[np.argmax(crossing)]} runs into the next "
+                f"{name} group, so the group would take in time outside it; aggregate to "
+                "steps that fit inside the groups (daily, or monthly for months and month "
+                "groups)"
+            )
+        change[1:] |= rebuilt[name][1:] != rebuilt[name][:-1]
+        if name == "month_group":
+            grouped &= rebuilt[name] != ""
+    # Steps of the calendar runs (one MAM, one year) the data touch.
+    run = np.cumsum(change)
+    touched = np.isin(run, run[at]) & grouped
+    if touched[0] or touched[-1]:
+        raise UsageError("a time group lasts over a year, so its full period is unknown")
+    return Counter(zip(*(rebuilt[name][touched] for name in labels), strict=True))
+
+
 _WEEKDAYS = {name.lower(): i for i, name in enumerate(day_name)}
 
 
