@@ -27,7 +27,7 @@ when you need a custom AND (`lat` + `member` but no time).
 
 | Name | Meaning |
 | --- | --- |
-| `lat` | Latitude (regular grid) |
+| `lat` | Latitude (regular grid), ascending (south to north) |
 | `lon` | Longitude (regular grid) |
 | `time` | Valid time |
 | `init_time` | Forecast initialization time |
