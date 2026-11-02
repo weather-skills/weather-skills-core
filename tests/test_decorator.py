@@ -58,6 +58,16 @@ def test_parser_basic_flags():
     assert dests == {"input", "output", "bbox"}
 
 
+def test_open_zarr_names_the_input_in_a_units_error(tmp_path):
+    from weather_skills_core.decorator import _open_zarr
+    from weather_skills_core.errors import UsageError
+
+    path = tmp_path / "onset.zarr"
+    make_gridded(name="onset", fill=40.0, units="day of year").to_zarr(path)
+    with pytest.raises(UsageError, match=rf"^{path}: variable 'onset' has units"):
+        _open_zarr(path)
+
+
 def test_argv_has_option():
     flags = ("--probe-latest",)
     assert argv_has_option(["--probe-latest"], flags) is True
