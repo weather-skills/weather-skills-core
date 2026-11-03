@@ -884,12 +884,31 @@ def test_run_loop_write_snaps_latlon_to_float32(tmp_path):
     assert written["longitude"].dtype == np.float32
     np.testing.assert_array_equal(
         written["latitude"].values,
-        np.round(np.array([5.9749990996248385, -1.2750010213]), 5).astype(np.float32),
+        np.round(np.array([-1.2750010213, 5.9749990996248385]), 5).astype(np.float32),
     )
     np.testing.assert_array_equal(
         written["longitude"].values,
         np.round(np.array([33.0, 36.825]), 5).astype(np.float32),
     )
+
+
+def test_run_loop_write_puts_latitude_south_to_north(tmp_path):
+    src = tmp_path / "in.zarr"
+    out = tmp_path / "out.zarr"
+    ds = make_gridded(lats=(3.0, 2.0, 1.0))
+    ds["precip"].values[:, 0, :] = 5.0  # the northern row, first in the store
+    ds.to_zarr(src, mode="w", consolidated=True)
+
+    @weather_skill(name="copy", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("observations"), required=True)
+    def copy(ds, output, **kwargs):
+        return ds
+
+    copy(["-i", str(src), "-o", str(out)])
+    written = xr.open_zarr(out, consolidated=True)
+    np.testing.assert_array_equal(written["latitude"].values, [1.0, 2.0, 3.0])
+    assert (written["precip"].sel(latitude=3.0) == 5.0).all()
+    assert (written["precip"].sel(latitude=1.0) == 1.0).all()
 
 
 def test_run_loop_none_return_skips_write(tmp_path):
