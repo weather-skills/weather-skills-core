@@ -10,7 +10,7 @@ from conftest import make_forecast, make_gridded
 from PIL import Image
 
 from weather_skills_core import Dataset
-from weather_skills_core.decorator import argv_has_option, weather_skill
+from weather_skills_core.decorator import argv_has_option, weather_skill, write_output
 from weather_skills_core.provenance import (
     HISTORY_ATTR,
     load_figure_history,
@@ -1025,3 +1025,9 @@ def test_netcdf_input_says_it_is_netcdf(tmp_path, capsys):
         skill(["-i", str(nc)])
     assert exc.value.code == 2
     assert "is a NetCDF file" in capsys.readouterr().err
+
+
+def test_wrote_line_names_each_variable_and_its_units(tmp_path, capsys):
+    out = tmp_path / "out.zarr"
+    write_output(make_gridded(), out, {}, None)
+    assert f"Wrote: {out} (precip mm day-1)" in capsys.readouterr().err

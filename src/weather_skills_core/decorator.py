@@ -151,10 +151,13 @@ def write_output(value, out_path, history, first_ds):
         if written.resolve() != out_path.resolve():
             raise SkillError(f"returned path {written} does not match --output {out_path}")
         if written.is_dir():
+            import xarray as xr
+
             provenance_mod.restamp_zarr(written, history)
+            print(f"Wrote: {out_path} ({_variable_list(xr.open_zarr(written))})", file=sys.stderr)
         else:
             provenance_mod.stamp_figure(written, history)
-        print(f"Wrote: {out_path}", file=sys.stderr)
+            print(f"Wrote: {out_path}", file=sys.stderr)
         return
 
     if not hasattr(value, "dims"):
@@ -180,7 +183,13 @@ def write_output(value, out_path, history, first_ds):
         if out_path.exists():
             shutil.rmtree(out_path)
         raise
-    print(f"Wrote: {out_path}", file=sys.stderr)
+    print(f"Wrote: {out_path} ({_variable_list(value)})", file=sys.stderr)
+
+
+def _variable_list(ds):
+    """The data variables and their units, as the Wrote line names them: ``precip mm day-1``."""
+    names = [f"{name} {ds[name].attrs.get('units', '')}".strip() for name in ds.data_vars]
+    return ", ".join(names) or "no data variables"
 
 
 def _open_zarr(path, io_spec=None):
