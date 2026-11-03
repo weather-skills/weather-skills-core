@@ -117,11 +117,13 @@ def prepare_dataset_output(ds, *, first_ds=None):
     - precip amount units → amount CF ``standard_name``
     - ``step`` timedelta → ``timedelta64[ns]``
     - lat/lon coords → 5 decimal places, ``float32``
+    - descending latitude dim → ascending (south to north)
     - fill attrs stripped by geometry ops from the first input (same var names)
     - drop CF reference attrs naming variables the output lacks
     """
     from weather_skills_core.cf import drop_dangling_cf_refs
     from weather_skills_core.standard_utils import (
+        ensure_ascending_latitude,
         fill_missing_data_var_attrs,
         normalize_latlon_coords,
         normalize_step_coord,
@@ -141,7 +143,8 @@ def prepare_dataset_output(ds, *, first_ds=None):
     ds = stamp_precip_amounts(ds)
     ds = normalize_step_coord(ds)
     ds = drop_dangling_cf_refs(ds)
-    return normalize_latlon_coords(ds)
+    ds = normalize_latlon_coords(ds)
+    return ensure_ascending_latitude(ds)
 
 
 def write_output(value, out_path, history, first_ds):

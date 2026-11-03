@@ -91,6 +91,23 @@ def normalize_latlon_coords(ds):
     return out
 
 
+def ensure_ascending_latitude(ds):
+    """Order a latitude dim south to north.
+
+    A descending dim is reversed with a slice, which keeps in-memory data a
+    view rather than a copy. A dim in no order is sorted, which copies.
+    """
+    try:
+        lat_dim, _ = detect_spatial_dims(ds)
+    except UsageError:
+        return ds
+    if lat_dim not in ds.indexes or ds.indexes[lat_dim].is_monotonic_increasing:
+        return ds
+    if ds.indexes[lat_dim].is_monotonic_decreasing:
+        return ds.isel({lat_dim: slice(None, None, -1)})
+    return ds.sortby(lat_dim)
+
+
 def fill_missing_data_var_attrs(src, dst):
     """Fill attrs present on ``src`` but missing on matching ``dst`` data vars.
 

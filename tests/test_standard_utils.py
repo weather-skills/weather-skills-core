@@ -623,6 +623,43 @@ def test_normalize_latlon_coords_idempotent():
     assert second is first
 
 
+def test_ensure_ascending_latitude_reverses_descending_without_copying():
+    import numpy as np
+
+    ds = make_gridded(lats=(3.0, 2.0, 1.0))
+    ds["precip"].values[:, 0, :] = 5.0  # the northern row
+    out = utils.ensure_ascending_latitude(ds)
+    np.testing.assert_array_equal(out["latitude"].values, [1.0, 2.0, 3.0])
+    assert (out["precip"].sel(latitude=3.0) == 5.0).all()
+    assert np.shares_memory(out["precip"].values, ds["precip"].values)
+
+
+def test_ensure_ascending_latitude_sorts_unordered():
+    import numpy as np
+
+    ds = make_gridded(lats=(2.0, 3.0, 1.0))
+    ds["precip"].values[:, 1, :] = 5.0  # the 3.0 row
+    out = utils.ensure_ascending_latitude(ds)
+    np.testing.assert_array_equal(out["latitude"].values, [1.0, 2.0, 3.0])
+    assert (out["precip"].sel(latitude=3.0) == 5.0).all()
+    assert (out["precip"].sel(latitude=1.0) == 1.0).all()
+
+
+def test_ensure_ascending_latitude_leaves_ascending_and_stations():
+    ascending = make_gridded(lats=(1.0, 2.0, 3.0))
+    assert utils.ensure_ascending_latitude(ascending) is ascending
+    station = make_station()
+    assert utils.ensure_ascending_latitude(station) is station
+
+
+def test_ensure_ascending_latitude_aliased_dim():
+    import numpy as np
+
+    ds = make_gridded(lats=(3.0, 2.0, 1.0)).rename({"latitude": "lat", "longitude": "lon"})
+    out = utils.ensure_ascending_latitude(ds)
+    np.testing.assert_array_equal(out["lat"].values, [1.0, 2.0, 3.0])
+
+
 def test_normalize_step_coord_noop_when_already_ns():
     import numpy as np
     import xarray as xr
