@@ -634,11 +634,20 @@ def test_ensure_ascending_latitude_reverses_descending_without_copying():
     assert np.shares_memory(out["precip"].values, ds["precip"].values)
 
 
-def test_ensure_ascending_latitude_leaves_other_orders():
+def test_ensure_ascending_latitude_sorts_unordered():
+    import numpy as np
+
+    ds = make_gridded(lats=(2.0, 3.0, 1.0))
+    ds["precip"].values[:, 1, :] = 5.0  # the 3.0 row
+    out = utils.ensure_ascending_latitude(ds)
+    np.testing.assert_array_equal(out["latitude"].values, [1.0, 2.0, 3.0])
+    assert (out["precip"].sel(latitude=3.0) == 5.0).all()
+    assert (out["precip"].sel(latitude=1.0) == 1.0).all()
+
+
+def test_ensure_ascending_latitude_leaves_ascending_and_stations():
     ascending = make_gridded(lats=(1.0, 2.0, 3.0))
     assert utils.ensure_ascending_latitude(ascending) is ascending
-    unordered = make_gridded(lats=(2.0, 1.0, 3.0))
-    assert utils.ensure_ascending_latitude(unordered) is unordered
     station = make_station()
     assert utils.ensure_ascending_latitude(station) is station
 
