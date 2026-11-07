@@ -133,12 +133,18 @@ def test_revision_from_direct_url_off_sys_path(tmp_path):
     info = site / "fake_skills-0.1.0.dist-info"
     info.mkdir()
     (info / "METADATA").write_text("Metadata-Version: 2.1\nName: fake-skills\nVersion: 0.1.0\n")
-    (info / "RECORD").write_text("skills/clip/scripts/clip.py,,\nfake_skills-0.1.0.dist-info/RECORD,,\n")
+    (info / "RECORD").write_text(
+        "skills/clip/scripts/clip.py,,\nfake_skills-0.1.0.dist-info/RECORD,,\n"
+    )
     (info / "direct_url.json").write_text(
         json.dumps(
             {
                 "url": "https://github.com/example/skills.git",
-                "vcs_info": {"vcs": "git", "commit_id": "abc123def456", "requested_revision": "main"},
+                "vcs_info": {
+                    "vcs": "git",
+                    "commit_id": "abc123def456",
+                    "requested_revision": "main",
+                },
             }
         )
     )
