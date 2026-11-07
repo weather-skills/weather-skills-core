@@ -548,18 +548,23 @@ def convert_values(values, src_units: str, dst_units: str):
     Returns ``(converted_array, density_converted)`` where the flag is True when
     the density step was required.
     """
-    q = ureg.Quantity(np.asarray(values), src_units)
+    values = np.asarray(values)
+    dtype = values.dtype if values.dtype.kind == "f" else np.dtype("float64")
+    # Convert one copy in place: float32 stays float32. Out-of-place `q / rho`
+    # makes float64 copies (~8x a float32 field).
+    q = ureg.Quantity(np.array(values, dtype=dtype), src_units)
+    density = not q.is_compatible_with(dst_units)
+    if density:
+        rho = water_density()
+        if (q.units / rho.units).is_compatible_with(dst_units):
+            q /= rho
+        else:
+            q *= rho
     try:
-        return np.asarray(q.to(dst_units).magnitude), False
+        q.ito(dst_units)
     except pint_xarray.pint.DimensionalityError:
-        pass
-    rho = water_density()
-    for density_scaled in (q / rho, q * rho):
-        try:
-            return np.asarray(density_scaled.to(dst_units).magnitude), True
-        except pint_xarray.pint.DimensionalityError:
-            continue
-    raise UsageError(f"{src_units!r} not convertible to {dst_units!r}")
+        raise UsageError(f"{src_units!r} not convertible to {dst_units!r}") from None
+    return q.magnitude, density
 
 
 def units_convertible(src_units: str, dst_units: str) -> bool:
@@ -584,22 +589,8 @@ def convert_dataarray(da, dst_units: str):
     src_units = variable_units(da)
     if src_units is None:
         raise UsageError(f"variable {da.name!r} has no units to convert")
-    # Pint converts one copy of the field in place, so a float32 field stays
-    # float32. Out-of-place `q / rho` makes float64 copies (~8x the field).
-    dtype = plain.dtype if plain.dtype.kind == "f" else np.dtype("float64")
-    q = ureg.Quantity(np.array(plain.data, dtype=dtype), src_units)
-    density = not q.is_compatible_with(dst_units)
-    if density:
-        rho = water_density()
-        if (ureg.Quantity(1.0, q.units) / rho).is_compatible_with(dst_units):
-            q /= rho
-        else:
-            q *= rho
-    try:
-        q.ito(dst_units)
-    except pint_xarray.pint.DimensionalityError:
-        raise UsageError(f"{src_units!r} not convertible to {dst_units!r}") from None
-    out = plain.copy(data=q.magnitude)
+    data, density = convert_values(plain.data, src_units, dst_units)
+    out = plain.copy(data=data)
     out.attrs = {**plain.attrs, "units": dst_units}
     return (out.pint.quantify() if quantified_in else out), density
 
