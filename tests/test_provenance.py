@@ -123,6 +123,34 @@ def test_resolve_skill_revision_from_this_checkout():
     assert revision["repo"] == provenance.normalize_repo_url(origin)
 
 
+def test_revision_from_direct_url_off_sys_path(tmp_path):
+    # Mirrors `uvx --from git+…`: the skill file lives in a site-packages that is
+    # not on this interpreter's sys.path (the skill runs via `uv run --script`).
+    site = tmp_path / "lib" / "site-packages"
+    script = site / "skills" / "clip" / "scripts" / "clip.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("x = 1\n", encoding="utf-8")
+    info = site / "fake_skills-0.1.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: fake-skills\nVersion: 0.1.0\n")
+    (info / "RECORD").write_text("skills/clip/scripts/clip.py,,\nfake_skills-0.1.0.dist-info/RECORD,,\n")
+    (info / "direct_url.json").write_text(
+        json.dumps(
+            {
+                "url": "https://github.com/example/skills.git",
+                "vcs_info": {"vcs": "git", "commit_id": "abc123def456", "requested_revision": "main"},
+            }
+        )
+    )
+    assert provenance._revision_from_direct_url(script.resolve()) == {
+        "commit": "abc123def456",
+        "repo": "https://github.com/example/skills",
+    }
+    other = tmp_path / "other.py"
+    other.write_text("x = 1\n", encoding="utf-8")
+    assert provenance._revision_from_direct_url(other.resolve()) is None
+
+
 def test_resolve_skill_revision_marks_dirty(monkeypatch, tmp_path):
     script = tmp_path / "clip.py"
     script.write_text("x = 1\n", encoding="utf-8")
