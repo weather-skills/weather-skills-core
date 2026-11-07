@@ -528,7 +528,7 @@ def test_run_loop_figure_stamp_needs_history_on_every_input(tmp_path):
 
     @weather_skill(name="plot", version="0.1.0")
     @weather_skill.argument("-i", "--input", type=Dataset("any"), action="append")
-    @weather_skill.argument("--points", type=Path, source=True)
+    @weather_skill.argument("--points", type=Path, external_input=True)
     def plot(output, **kwargs):
         Image.new("RGB", (400, 300), color=(220, 220, 220)).save(output)
         return output
@@ -544,8 +544,8 @@ def test_run_loop_figure_stamp_needs_history_on_every_input(tmp_path):
     assert not stamped("-i", str(with_history), "-i", str(bare))
     assert not stamped("-i", str(with_history), "--points", str(table))
     out = next(tmp_path.glob("plot3.png"))
-    sources = load_figure_history(out)[-1]["input"]
-    assert sources[1]["basename"] == "points.csv" and sources[1]["history"] == []
+    inputs = load_figure_history(out)[-1]["input"]
+    assert inputs[1]["basename"] == "points.csv" and inputs[1]["history"] == []
 
 
 def test_run_loop_figure_wrong_path_exits(tmp_path):
