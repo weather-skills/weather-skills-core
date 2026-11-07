@@ -41,9 +41,9 @@ class Argument:
 
     ``probe=True`` is reserved: when that flag is on argv, the decorator
     drops every ``required=True`` flag (including ``-o``) and skips writing.
-    ``source=True`` marks a file of data the skill reads that is not a Zarr (an
-    imported CSV or NetCDF): it is hashed and recorded as an input with no
-    history, so figures made from it carry no provenance stamp.
+    ``external_input=True`` marks a file of data from outside the skills that
+    the skill reads (an imported CSV or NetCDF): it is hashed and recorded as
+    an input with no history, so figures made from it carry no provenance stamp.
     """
 
     def __init__(self, *option_strings, **kwargs):
@@ -51,7 +51,7 @@ class Argument:
             raise ValueError("Argument requires at least one option string or positional name")
         kwargs = dict(kwargs)
         self.probe = bool(kwargs.pop("probe", False))
-        self.source = bool(kwargs.pop("source", False))
+        self.external_input = bool(kwargs.pop("external_input", False))
         self.option_strings = option_strings
         self.kwargs = kwargs
         self.dataset_type: Dataset | None = None
@@ -279,7 +279,7 @@ def open_dataset_params(params, arguments):
 
     for arg in arguments:
         raw = params.get(arg.dest)
-        if not arg.source or raw is None:
+        if not arg.external_input or raw is None:
             continue
         for path in raw if isinstance(raw, (list, tuple)) else (raw,):
             input_paths.append(Path(path))
