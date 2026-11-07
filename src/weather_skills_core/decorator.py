@@ -4,6 +4,7 @@ import argparse
 import functools
 import inspect
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -78,7 +79,30 @@ def _history_json_default(obj):
     return str(obj)
 
 
-def build_history(name, version, args, params, input_paths, upstream, strip_dests, revision=None):
+def _run_dir_path(value):
+    """A recorded arg with a file path made relative to the run folder.
+
+    An absolute or ``~`` path to an existing file (alone, or as PATH in
+    PATH=NAME) is rewritten relative to the working directory; anything else is
+    returned as given. Lists are rewritten item by item.
+    """
+    if isinstance(value, list):
+        return [_run_dir_path(v) for v in value]
+    if not isinstance(value, str):
+        return value
+    path, sep, name = value.rpartition("=")
+    if not sep:
+        path, name = value, ""
+    if not path.startswith(("/", "~")):
+        return value
+    try:
+        found = Path(path).expanduser().exists()
+    except OSError:  # not a path (too long, bad characters)
+        found = False
+    return os.path.relpath(Path(path).expanduser()) + sep + name if found else value
+
+
+def build_history(name, version, args, params, input_paths, upstream, revision=None):
     """Record this skill as a node on the provenance DAG.
 
     A fetcher (no inputs) or a single-input transform stays a path: the
@@ -86,8 +110,12 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
     top-level array is only this entry, and every parent's full subgraph is
     nested on that entry's ``input`` list. ``revision`` is the git identity
     of the skill that ran (commit / repo / dirty).
+
+    ``args`` keeps every flag but ``--output``, inputs included, so each file
+    a step read is named in its args by the path it was passed, relative to the
+    run folder.
     """
-    entry_args = {k: v for k, v in vars(args).items() if k not in strip_dests}
+    entry_args = {k: v for k, v in vars(args).items() if k != "output"}
     for dest in ("date", "start_time", "end_time"):
         value = params.get(dest)
         if isinstance(value, list):
@@ -95,6 +123,7 @@ def build_history(name, version, args, params, input_paths, upstream, strip_dest
         elif value is not None:
             entry_args[dest] = value.isoformat()
     entry_args = json.loads(json.dumps(entry_args, default=_history_json_default))
+    entry_args = {k: _run_dir_path(v) for k, v in entry_args.items()}
 
     if not input_paths:
         input_field, base_history = None, []
@@ -391,7 +420,6 @@ def weather_skill(
                 )
             parser.add_argument(*arg.option_strings, **kwargs)
 
-        strip_dests = {arg.dest for arg in arguments if arg.dataset_type is not None} | {"output"}
         # Options taking one value (store/append), for rewrite_negative_values.
         value_options = {
             opt
@@ -477,7 +505,6 @@ def weather_skill(
                     params,
                     input_paths,
                     upstream,
-                    strip_dests,
                     revision=provenance_mod.resolve_skill_revision(fn),
                 )
                 for value, out_path in zip(results, output_paths, strict=True):

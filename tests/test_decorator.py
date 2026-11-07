@@ -806,7 +806,6 @@ def test_run_loop_multi_input_records_join_dag_and_commit(tmp_path):
         {},
         [a, b],
         [a_hist, b_hist],
-        {"output"},
         revision={"commit": "deadbeef"},
     )
     assert [step["skill"] for step in joined] == ["cat"]
@@ -1082,3 +1081,33 @@ def test_wrote_line_names_each_variable_and_its_units(tmp_path, capsys):
     out = tmp_path / "out.zarr"
     write_output(make_gridded(), out, {}, None)
     assert f"Wrote: {out} (precip mm day-1)" in capsys.readouterr().err
+
+
+def test_history_records_input_paths_relative_to_run_folder(tmp_path, monkeypatch):
+    run = tmp_path / "run"
+    (run / "data").mkdir(parents=True)
+    src = run / "data" / "in.zarr"
+    make_gridded().to_zarr(src, mode="w", consolidated=True)
+    outline = tmp_path / "outline.geojson"  # outside the run folder
+    outline.write_text("{}")
+    monkeypatch.chdir(run)
+
+    @weather_skill(name="s", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), required=True)
+    @weather_skill.argument("--geojson")
+    @weather_skill.argument("--layer", action="append")
+    @weather_skill.argument("--note")
+    def skill(ds, output, **kwargs):
+        return ds
+
+    skill([
+        "-i", str(src), "--geojson", str(outline), "--layer", f"{outline}=REGION",
+        "--note", "/not/a/file", "-o", "out.zarr",
+    ])  # fmt: skip
+    args = load_history(run / "out.zarr")[-1]["args"]
+    # Every file a step read is named in its args, by a path from the run folder.
+    assert args["input"] == "data/in.zarr"
+    assert args["geojson"] == "../outline.geojson"
+    assert args["layer"] == ["../outline.geojson=REGION"]
+    assert args["note"] == "/not/a/file"  # not an existing file: kept as given
+    assert "output" not in args
