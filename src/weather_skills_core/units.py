@@ -511,6 +511,18 @@ def quantify_dataset(ds):
     try:
         out = out.pint.quantify()
     except Exception as exc:  # noqa: BLE001 — surface pint parse failures cleanly
+        # Name the variable whose units string pint can't read, and the string.
+        for name in out.data_vars:
+            units = out[name].attrs.get("units")
+            try:
+                if isinstance(units, str):
+                    ureg.Unit(units)
+            except Exception:  # noqa: BLE001
+                raise UsageError(
+                    f"variable {name!r} has units {units!r}, which is not a unit string; set "
+                    "its units attribute to one (such as 'mm', 'day', or '1' for a count or "
+                    "index), or remove it if the values have no unit"
+                ) from None
         raise UsageError(f"could not quantify dataset units: {exc}") from None
 
     for name, units in saved_coord_units.items():

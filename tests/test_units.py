@@ -216,6 +216,13 @@ def test_quantify_dataset_requires_units_for_temp_precip():
         quantify_dataset(ds)
 
 
+def test_quantify_dataset_names_units_it_cannot_read():
+    """A units string pint can't read names its variable and the string."""
+    ds = make_gridded(name="onset", fill=40.0, units="day of year")
+    with pytest.raises(UsageError, match=r"variable 'onset' has units 'day of year'.*'1'"):
+        quantify_dataset(ds)
+
+
 def test_quantify_dataset_accepts_amount_totals():
     """mm amounts quantify."""
     ds = make_gridded(name="precip", units="mm")

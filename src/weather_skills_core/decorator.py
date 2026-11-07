@@ -231,7 +231,10 @@ def _open_zarr(path, io_spec=None):
     # Same lat/lon snap as on write, so a Zarr written before float32 coords
     # still joins cell-for-cell with a new one.
     ds = normalize_latlon_coords(ds)
-    return quantify_dataset(ds)
+    try:
+        return quantify_dataset(ds)
+    except UsageError as exc:
+        raise UsageError(f"{path}: {exc}") from None
 
 
 def open_dataset_params(params, arguments):
