@@ -587,14 +587,19 @@ def convert_dataarray(da, dst_units: str):
     stamped to ``dst_units``.
     """
     quantified_in = da.pint.units is not None
-    plain = da.pint.dequantify() if quantified_in else da
     src_units = variable_units(da)
     if src_units is None:
         raise UsageError(f"variable {da.name!r} has no units to convert")
-    data, density = convert_values(plain.data, src_units, dst_units)
-    out = plain.copy(data=data)
-    out.attrs = {**plain.attrs, "units": dst_units}
-    return (out.pint.quantify() if quantified_in else out), density
+    data, density = convert_values(
+        da.data.magnitude if quantified_in else da.data, src_units, dst_units
+    )
+    # Replace only the values: the coords stay as given, so the result still
+    # aligns with the dataset it came from (re-quantifying would add pint indexes).
+    if quantified_in:
+        return da.copy(data=ureg.Quantity(data, dst_units)), density
+    out = da.copy(data=data)
+    out.attrs = {**da.attrs, "units": dst_units}
+    return out, density
 
 
 def to_standard_units(ds, variables=None):

@@ -855,3 +855,15 @@ def test_stamp_precip_amounts_leaves_non_precip_kg_m2_alone():
     rate["precip"].attrs["standard_name"] = "lwe_precipitation_rate"
     stamped = stamp_precip_amounts(rate)["precip"].attrs["standard_name"]
     assert stamped == "lwe_thickness_of_precipitation_amount"
+
+
+def test_to_standard_units_keeps_coord_units_on_quantified_dataset():
+    """Converting a quantified dataset leaves its coords alone, so the result aligns."""
+    ds = make_gridded()
+    ds["latitude"].attrs["units"] = "degrees_north"
+    ds["precip"] = ds["precip"] / 86400
+    ds["precip"].attrs["units"] = "kg m-2 s-1"
+    out = to_standard_units(quantify_dataset(ds))
+    assert units_equal(str(out["precip"].pint.units), "mm day-1")
+    np.testing.assert_allclose(out["precip"].pint.magnitude, make_gridded()["precip"], rtol=1e-6)
+    assert out["latitude"].attrs["units"] == "degrees_north"
