@@ -814,6 +814,33 @@ def test_convert_dataarray_keeps_float32():
         )
 
 
+def test_convert_dataarray_peak_memory_one_copy():
+    """A big float32 field converts with about one output copy, not float64 temporaries."""
+    import tracemalloc
+
+    da = xr.DataArray(np.ones((200, 100, 100), "float32"), attrs={"units": "kg m-2 s-1"})
+    tracemalloc.start()
+    try:
+        out, _ = convert_dataarray(da, "mm day-1")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out.dtype == np.float32
+    np.testing.assert_allclose(out.values, 86400.0, rtol=1e-6)
+    assert peak < 1.5 * da.nbytes
+
+
+def test_convert_dataarray_offset_units():
+    """Affine units keep their offset: kelvin to degC, quantified in and out."""
+    da = xr.DataArray(np.array([273.15, 300.0], "float32"), attrs={"units": "K"})
+    out, density = convert_dataarray(da, "degC")
+    assert not density
+    np.testing.assert_allclose(out.values, [0.0, 26.85], atol=1e-4)
+    q, _ = convert_dataarray(da.pint.quantify(), "degC")
+    assert q.pint.units is not None
+    np.testing.assert_allclose(q.pint.dequantify().values, [0.0, 26.85], atol=1e-4)
+
+
 def test_stamp_precip_amounts_leaves_non_precip_kg_m2_alone():
     """Total column water / water vapour in kg m-2 are not precipitation."""
     ds = make_gridded(n_time=1, fill=20.0, units="kg m-2", name="tcw")

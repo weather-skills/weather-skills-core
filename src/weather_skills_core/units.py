@@ -572,7 +572,7 @@ def units_convertible(src_units: str, dst_units: str) -> bool:
 
 
 def convert_dataarray(da, dst_units: str):
-    """Convert a DataArray with pint-xarray; density step when dims do not match.
+    """Convert a DataArray's units (pint gives the factor); density step when dims do not match.
 
     Accepts already-quantified or attrs-based units. Returns
     ``(converted_dataarray, density_converted)``. Result stays quantified when
@@ -580,35 +580,20 @@ def convert_dataarray(da, dst_units: str):
     stamped to ``dst_units``.
     """
     quantified_in = da.pint.units is not None
-    qda = da if quantified_in else da.pint.quantify()
-    # Keep a float32 field float32: the registry stores scalars (the water
-    # density, conversion factors) as 0-d float64 arrays, which upcast.
-    keep = da.dtype if da.dtype.kind == "f" else None
-    try:
-        out = qda.pint.to(dst_units)
-        out = out.astype(keep) if keep else out
-        if quantified_in:
-            return out, False
-        out = out.pint.dequantify()
-        out.attrs = {**out.attrs, "units": dst_units}
-        return out, False
-    except (pint_xarray.pint.DimensionalityError, pint_xarray.errors.PintExceptionGroup):
-        pass
-
-    rho = water_density()
-    data = qda.data
-    for density_scaled in (data / rho, data * rho):
-        try:
-            converted = density_scaled.to(dst_units)
-        except pint_xarray.pint.DimensionalityError:
-            continue
-        converted = converted.astype(keep) if keep else converted
-        if quantified_in:
-            return da.copy(data=converted), True
-        out = da.copy(data=np.asarray(converted.magnitude))
-        out.attrs = {**da.attrs, "units": dst_units}
-        return out, True
-    raise UsageError(f"{variable_units(da)!r} not convertible to {dst_units!r}")
+    plain = da.pint.dequantify() if quantified_in else da
+    src_units = variable_units(da)
+    if src_units is None:
+        raise UsageError(f"variable {da.name!r} has no units to convert")
+    # Pint converts only 0 and 1; the field gets one multiply-add. Converting
+    # the whole array through pint made float64 copies, ~8x a float32 field.
+    (offset, end), density = convert_values(np.array([0.0, 1.0]), src_units, dst_units)
+    dtype = plain.dtype if plain.dtype.kind == "f" else np.dtype("float64")
+    data = plain.data * dtype.type(end - offset)
+    if offset:
+        data += dtype.type(offset)
+    out = plain.copy(data=data)
+    out.attrs = {**plain.attrs, "units": dst_units}
+    return (out.pint.quantify() if quantified_in else out), density
 
 
 def to_standard_units(ds, variables=None):
