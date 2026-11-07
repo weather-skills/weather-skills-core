@@ -548,11 +548,12 @@ def convert_values(values, src_units: str, dst_units: str):
     Returns ``(converted_array, density_converted)`` where the flag is True when
     the density step was required.
     """
-    values = np.asarray(values)
+    if not hasattr(values, "dtype"):
+        values = np.asarray(values)
     dtype = values.dtype if values.dtype.kind == "f" else np.dtype("float64")
     # Convert one copy in place: float32 stays float32. Out-of-place `q / rho`
-    # makes float64 copies (~8x a float32 field).
-    q = ureg.Quantity(np.array(values, dtype=dtype), src_units)
+    # makes float64 copies (~8x a float32 field). astype keeps dask lazy.
+    q = ureg.Quantity(values.astype(dtype, copy=True), src_units)
     density = not q.is_compatible_with(dst_units)
     if density:
         rho = water_density()
@@ -564,7 +565,8 @@ def convert_values(values, src_units: str, dst_units: str):
         q.ito(dst_units)
     except pint_xarray.pint.DimensionalityError:
         raise UsageError(f"{src_units!r} not convertible to {dst_units!r}") from None
-    return q.magnitude, density
+    # Dask cannot convert in place, so pint returns float64 there; cast back.
+    return q.magnitude.astype(dtype, copy=False), density
 
 
 def units_convertible(src_units: str, dst_units: str) -> bool:
