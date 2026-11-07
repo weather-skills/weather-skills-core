@@ -516,6 +516,38 @@ def test_run_loop_figure_output(tmp_path):
     assert load_figure_history(out)[-1]["skill"] == "plot"
 
 
+def test_run_loop_figure_stamp_needs_history_on_every_input(tmp_path):
+    with_history = tmp_path / "fetched.zarr"
+    bare = tmp_path / "bare.zarr"
+    table = tmp_path / "points.csv"
+    table.write_text("id,lat,lon\n1,0,0\n")
+    ds = make_gridded()
+    stamp_zarr(ds, [{"skill": "fetch", "version": "1", "args": {}, "input": None}])
+    ds.to_zarr(with_history, mode="w", consolidated=True)
+    make_gridded().to_zarr(bare, mode="w", consolidated=True)
+
+    @weather_skill(name="plot", version="0.1.0")
+    @weather_skill.argument("-i", "--input", type=Dataset("any"), action="append")
+    @weather_skill.argument("--points", type=Path, source=True)
+    def plot(output, **kwargs):
+        Image.new("RGB", (400, 300), color=(220, 220, 220)).save(output)
+        return output
+
+    def stamped(*argv):
+        out = tmp_path / f"plot{len(list(tmp_path.glob('plot*')))}.png"
+        plot([*argv, "-o", str(out)])
+        corner = Image.open(out).convert("RGB").crop((320, 250, 400, 300)).getcolors()
+        return corner != [(80 * 50, (220, 220, 220))]
+
+    assert stamped("-i", str(with_history))
+    assert not stamped("-i", str(bare))
+    assert not stamped("-i", str(with_history), "-i", str(bare))
+    assert not stamped("-i", str(with_history), "--points", str(table))
+    out = next(tmp_path.glob("plot3.png"))
+    sources = load_figure_history(out)[-1]["input"]
+    assert sources[1]["basename"] == "points.csv" and sources[1]["history"] == []
+
+
 def test_run_loop_figure_wrong_path_exits(tmp_path):
     out = tmp_path / "plot.png"
     wrong = tmp_path / "other.png"

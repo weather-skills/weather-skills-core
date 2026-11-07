@@ -168,6 +168,21 @@ def test_chain_validation_chain_is_intact():
     assert not provenance.chain_is_intact([bad])
 
 
+def test_chain_is_intact_needs_history_on_every_input():
+    ref = {"basename": "a.zarr", "hash": "h"}
+    fetched = [entry(skill="fetch")]
+    # A single input's history is the entries before it.
+    assert provenance.chain_is_intact(fetched + [entry(input=ref)])
+    assert not provenance.chain_is_intact([entry(input=ref)])
+    # A join's parents each carry their own, checked at every depth.
+    join = entry(input=[{**ref, "history": fetched}, {**ref, "history": fetched}])
+    assert provenance.chain_is_intact([join, entry(input=ref)])
+    assert not provenance.chain_is_intact([entry(input=[{**ref, "history": fetched}, ref])])
+    assert not provenance.chain_is_intact([entry(input=[{**ref, "history": []}, ref])])
+    inner = entry(input=[{**ref, "history": fetched}, {**ref, "history": [entry(input=ref)]}])
+    assert not provenance.chain_is_intact([entry(input=[{**ref, "history": [inner]}])])
+
+
 def test_visualization_png(tmp_path):
     path = tmp_path / "x.png"
     Image.new("RGB", (4, 4)).save(path)

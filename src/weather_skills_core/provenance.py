@@ -169,11 +169,31 @@ def validate_chain(chain, loc: str) -> tuple[list, list]:
 
 
 def chain_is_intact(history) -> bool:
-    """True if ``history`` is a non-empty schema-valid provenance chain."""
+    """True if ``history`` is a non-empty schema-valid chain whose every input, at
+    any depth, carries its own history.
+
+    An input with no history came from outside the skills (a Zarr made elsewhere,
+    an imported CSV or NetCDF file). GeoJSON outlines are not recorded as inputs,
+    so they never break the chain.
+    """
     if not isinstance(history, list) or not history:
         return False
     violations, _notes = validate_chain(history, HISTORY_ATTR)
-    return not violations
+    return not violations and _inputs_have_history(history)
+
+
+def _inputs_have_history(chain: list) -> bool:
+    for i, entry in enumerate(chain):
+        parents = entry["input"]
+        for item in parents if isinstance(parents, list) else [parents] if parents else []:
+            if "history" in item:
+                if not item["history"] or not _inputs_have_history(item["history"]):
+                    return False
+            # A single input's history is the entries before this one; a join's
+            # parents carry theirs on the item.
+            elif isinstance(parents, list) or i == 0:
+                return False
+    return True
 
 
 def _stamp_shape(width: float, height: float, px: float = 1.0):
@@ -479,7 +499,7 @@ def stamp_figure(path: Path, history: list) -> None:
     """Embed ``weather_skills_history`` into a PNG, JPEG, GIF, HTML, PDF, SVG, or GeoJSON/JSON
     file, or a sidecar next to a CSV or Excel table.
 
-    When the chain is intact (non-empty and schema-valid), also draw the
+    When the chain is intact (see ``chain_is_intact``), also draw the
     provenance stamp (a ring around a star, bottom-right) on PNG/JPEG pixels,
     every GIF frame, and SVG and PDF as vector shapes. HTML gets metadata only.
     """
