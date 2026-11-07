@@ -548,18 +548,25 @@ def convert_values(values, src_units: str, dst_units: str):
     Returns ``(converted_array, density_converted)`` where the flag is True when
     the density step was required.
     """
-    q = ureg.Quantity(np.asarray(values), src_units)
+    if not hasattr(values, "dtype"):
+        values = np.asarray(values)
+    dtype = values.dtype if values.dtype.kind == "f" else np.dtype("float64")
+    # Convert one copy in place: float32 stays float32. Out-of-place `q / rho`
+    # makes float64 copies (~8x a float32 field). astype keeps dask lazy.
+    q = ureg.Quantity(values.astype(dtype, copy=True), src_units)
+    density = not q.is_compatible_with(dst_units)
+    if density:
+        rho = water_density()
+        if (q.units / rho.units).is_compatible_with(dst_units):
+            q /= rho
+        else:
+            q *= rho
     try:
-        return np.asarray(q.to(dst_units).magnitude), False
+        q.ito(dst_units)
     except pint_xarray.pint.DimensionalityError:
-        pass
-    rho = water_density()
-    for density_scaled in (q / rho, q * rho):
-        try:
-            return np.asarray(density_scaled.to(dst_units).magnitude), True
-        except pint_xarray.pint.DimensionalityError:
-            continue
-    raise UsageError(f"{src_units!r} not convertible to {dst_units!r}")
+        raise UsageError(f"{src_units!r} not convertible to {dst_units!r}") from None
+    # Dask cannot convert in place, so pint returns float64 there; cast back.
+    return q.magnitude.astype(dtype, copy=False), density
 
 
 def units_convertible(src_units: str, dst_units: str) -> bool:
@@ -572,7 +579,7 @@ def units_convertible(src_units: str, dst_units: str) -> bool:
 
 
 def convert_dataarray(da, dst_units: str):
-    """Convert a DataArray with pint-xarray; density step when dims do not match.
+    """Convert a DataArray with pint; density step when dims do not match.
 
     Accepts already-quantified or attrs-based units. Returns
     ``(converted_dataarray, density_converted)``. Result stays quantified when
@@ -580,35 +587,14 @@ def convert_dataarray(da, dst_units: str):
     stamped to ``dst_units``.
     """
     quantified_in = da.pint.units is not None
-    qda = da if quantified_in else da.pint.quantify()
-    # Keep a float32 field float32: the registry stores scalars (the water
-    # density, conversion factors) as 0-d float64 arrays, which upcast.
-    keep = da.dtype if da.dtype.kind == "f" else None
-    try:
-        out = qda.pint.to(dst_units)
-        out = out.astype(keep) if keep else out
-        if quantified_in:
-            return out, False
-        out = out.pint.dequantify()
-        out.attrs = {**out.attrs, "units": dst_units}
-        return out, False
-    except (pint_xarray.pint.DimensionalityError, pint_xarray.errors.PintExceptionGroup):
-        pass
-
-    rho = water_density()
-    data = qda.data
-    for density_scaled in (data / rho, data * rho):
-        try:
-            converted = density_scaled.to(dst_units)
-        except pint_xarray.pint.DimensionalityError:
-            continue
-        converted = converted.astype(keep) if keep else converted
-        if quantified_in:
-            return da.copy(data=converted), True
-        out = da.copy(data=np.asarray(converted.magnitude))
-        out.attrs = {**da.attrs, "units": dst_units}
-        return out, True
-    raise UsageError(f"{variable_units(da)!r} not convertible to {dst_units!r}")
+    plain = da.pint.dequantify() if quantified_in else da
+    src_units = variable_units(da)
+    if src_units is None:
+        raise UsageError(f"variable {da.name!r} has no units to convert")
+    data, density = convert_values(plain.data, src_units, dst_units)
+    out = plain.copy(data=data)
+    out.attrs = {**plain.attrs, "units": dst_units}
+    return (out.pint.quantify() if quantified_in else out), density
 
 
 def to_standard_units(ds, variables=None):
