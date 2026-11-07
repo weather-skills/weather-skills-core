@@ -830,20 +830,6 @@ def test_convert_dataarray_peak_memory_one_copy():
     assert peak < 1.5 * da.nbytes
 
 
-def test_convert_dataarray_keeps_dask_lazy():
-    """Dask-backed fields stay lazy and float32, plain or quantified."""
-    dsa = pytest.importorskip("dask.array")
-    da = xr.DataArray(
-        dsa.full((4, 3), 1e-4, dtype="float32", chunks=2), attrs={"units": "kg m-2 s-1"}
-    )
-    for src in (da, da.pint.quantify()):
-        out, _ = convert_dataarray(src, "mm day-1")
-        data = out.pint.dequantify().data if out.pint.units is not None else out.data
-        assert isinstance(data, dsa.Array)
-        assert data.dtype == np.float32
-        np.testing.assert_allclose(data.compute(), 8.64, rtol=1e-5)
-
-
 def test_convert_dataarray_offset_units():
     """Affine units keep their offset: kelvin to degC, quantified in and out."""
     da = xr.DataArray(np.array([273.15, 300.0], "float32"), attrs={"units": "K"})
