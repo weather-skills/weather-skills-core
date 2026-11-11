@@ -6,6 +6,7 @@ import inspect
 import json
 import shutil
 import sys
+import warnings
 from pathlib import Path
 
 from weather_skills_core import provenance as provenance_mod
@@ -185,7 +186,10 @@ def write_output(value, out_path, history, first_ds):
     elif out_path.exists():
         out_path.unlink()
     try:
-        value.to_zarr(out_path, mode="w", consolidated=True)
+        # Zarr warns that v3 consolidated metadata is outside the spec; reads rely on it.
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Consolidated metadata is currently not part")
+            value.to_zarr(out_path, mode="w", consolidated=True)
     except Exception:
         if out_path.exists():
             shutil.rmtree(out_path)
