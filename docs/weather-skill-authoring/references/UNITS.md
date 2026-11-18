@@ -54,7 +54,14 @@ stamps exactly one of:
 - `data_interval` — uniform spacing as a pint string (`30 minute`,
   `1 day`)
 - `{dim}_bounds` — CF `(N, 2)` start/end per sample, when spacing is
-  irregular
+  irregular or calendar-based (monthly or yearly data)
+
+A fetcher that knows its cells passes `period=` (`"1 day"`, or `"1 month"`
+for month-start labels, which becomes bounds with each month's real length)
+or keeps the source's own bounds. Inference is a fallback: month-start
+dates get their own calendar month, evenly spaced dates get
+`data_interval`, and other uneven dates are refused, since a label could
+start or end its cell.
 
 Never both. Deaccumulate uses the same pair.
 

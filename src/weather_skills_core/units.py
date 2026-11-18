@@ -382,6 +382,14 @@ def _axis_tick_diffs(values):
     raise UsageError(f"could not infer spacing: {failure}")
 
 
+def _calendar_months(period: str) -> int | None:
+    """Months in a calendar period (``"N month"``, ``"N year"``), or None for a fixed one."""
+    match = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
+    if match is None:
+        return None
+    return int(match.group(1)) * (12 if match.group(2) == "year" else 1)
+
+
 def interval_days(coord, period: str):
     """Length in days of the interval each label of ``coord`` starts.
 
@@ -393,11 +401,10 @@ def interval_days(coord, period: str):
     """
     import pandas as pd
 
-    match = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
-    if match is None:
+    months = _calendar_months(period)
+    if months is None:
         days = float(parse_aggregation_period(period).to("day").magnitude)
         return np.full(np.shape(coord), days)
-    months = int(match.group(1)) * (12 if match.group(2) == "year" else 1)
     index = coord.to_index() if coord.ndim else None
     if index is None or not hasattr(index, "shift") or not hasattr(index, "day"):
         raise UsageError(
@@ -762,19 +769,37 @@ def stamp_data_interval(ds, period=None, dim=None):
     """Stamp native cell geometry: scalar ``data_interval`` or CF bounds.
 
     ``period`` (a pint duration such as ``"1 day"``) always writes the scalar
-    attr. Without it, an existing ``data_interval`` or CF bounds is kept;
-    otherwise the spacing of ``dim`` (or ``time`` / ``step``) is inferred:
-    even spacing gets ``data_interval``, as does a datetime axis with missing
-    rows (every spacing a whole multiple of the smallest); other uneven spacing
-    (e.g. forecast leads going from 3- to 6-hourly) gets ``{dim}_bounds`` with
-    each label at the end of its cell. A one-sample axis is left alone.
+    attr; a calendar period (``"1 month"``, ``"1 year"``) writes
+    ``{dim}_bounds`` from each month-start label to the same day N months on.
+    Without it, an existing ``data_interval`` or CF bounds is kept; otherwise
+    the spacing of ``dim`` (or ``time`` / ``step``) is inferred:
+
+    - Dates that are all month starts, whole months apart, get bounds from
+      each label to the label N months on (N the smallest gap).
+    - Even spacing gets ``data_interval``, as does a date axis with missing
+      rows (every spacing a whole multiple of the smallest).
+    - Other uneven dates raise: a label could start or end its cell, so the
+      caller must pass ``period`` or write bounds.
+    - Other uneven leads (forecast steps going from 3- to 6-hourly) get
+      ``{dim}_bounds`` with each label at the end of its cell.
+
+    A one-sample axis is left alone. The input dataset is not modified.
     """
+    ds = ds.copy()
     if period is not None:
-        period = format_duration(parse_aggregation_period(period))
         try:
             axis = _time_or_step_dim(ds, dim)
         except UsageError:
             axis = None
+        months = _calendar_months(period)
+        if months is not None:
+            cells = _month_start_cells(ds, axis, months) if axis is not None else None
+            if cells is None:
+                raise UsageError(
+                    f"data_interval {period!r} needs a date axis of month-start labels"
+                )
+            return _apply_bounds(ds, axis, cells)
+        period = format_duration(parse_aggregation_period(period))
         return _apply_scalar_interval(ds, period, axis=axis)
 
     axis = _time_or_step_dim(ds, dim)
@@ -787,6 +812,9 @@ def stamp_data_interval(ds, period=None, dim=None):
         raise UsageError(f"cannot stamp data_interval: empty {axis!r} axis")
     if ticks.size == 1:
         return ds
+    cells = _month_start_cells(ds, axis)
+    if cells is not None:
+        return _apply_bounds(ds, axis, cells)
     diffs, unit = _axis_tick_diffs(ticks)
     if np.any(diffs <= 0):
         raise UsageError(f"{axis!r} must be strictly increasing to stamp spacing")
@@ -800,12 +828,43 @@ def stamp_data_interval(ds, period=None, dim=None):
     ):
         period = format_duration(ureg.Quantity(float(base), unit).to("day"))
         return _apply_scalar_interval(ds, period, axis=axis)
+    if np.issubdtype(ticks.dtype, np.datetime64):
+        raise UsageError(
+            f"irregular {axis!r} dates: cannot tell whether each label starts or ends "
+            f"its cell; pass period= or write {axis}_bounds"
+        )
 
     first_start = _default_bounds_origin(ticks)
     if first_start is None:
         raise UsageError(f"irregular {axis!r} axis: cannot infer where the first cell starts")
     starts = np.concatenate([[first_start], ticks[:-1]]).astype(ticks.dtype)
     return _apply_bounds(ds, axis, np.stack([starts, ticks], axis=1))
+
+
+def _month_start_cells(ds, axis, months=None):
+    """``(N, 2)`` cells from each month-start label to the label ``months`` on, or None.
+
+    Without ``months``, the labels must be whole months apart and the smallest
+    gap is used. None when the axis is not dates or any label is not midnight
+    on the 1st.
+    """
+    index = ds.indexes.get(axis)
+    if index is None or not hasattr(index, "shift") or not hasattr(index, "month"):
+        return None
+    midnight_on_1st = (
+        (np.asarray(index.day) == 1)
+        & (np.asarray(index.hour) == 0)
+        & (np.asarray(index.minute) == 0)
+        & (np.asarray(index.second) == 0)
+    )
+    if not midnight_on_1st.all():
+        return None
+    if months is None:
+        gaps = np.diff(np.asarray(index.year) * 12 + np.asarray(index.month))
+        if gaps.size == 0 or gaps.min() <= 0 or np.any(gaps % gaps.min()):
+            return None
+        months = int(gaps.min())
+    return np.stack([np.asarray(index), np.asarray(index.shift(months, "MS"))], axis=1)
 
 
 def _default_bounds_origin(values):
@@ -815,8 +874,6 @@ def _default_bounds_origin(values):
         return None
     if np.issubdtype(values.dtype, np.timedelta64):
         return np.asarray(0).astype(values.dtype)
-    if np.issubdtype(values.dtype, np.datetime64):
-        return values[0] - (values[1] - values[0])
     first = values.flat[0]
     second = values.flat[1]
     try:
