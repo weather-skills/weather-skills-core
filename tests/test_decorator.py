@@ -1082,3 +1082,35 @@ def test_wrote_line_names_each_variable_and_its_units(tmp_path, capsys):
     out = tmp_path / "out.zarr"
     write_output(make_gridded(), out, {}, None)
     assert f"Wrote: {out} (precip mm day-1)" in capsys.readouterr().err
+
+
+def test_wrote_line_gives_dim_sizes_and_time_range(tmp_path, capsys):
+    out = tmp_path / "out.zarr"
+    write_output(make_gridded(n_time=3), out, {}, None)
+    err = capsys.readouterr().err
+    assert (
+        f"Wrote: {out} (precip mm day-1) time=3 latitude=3 longitude=4; time 2026-01-01..2026-01-03"
+        in err
+    )
+    assert "precip:" not in err  # 36 cells: too many to print
+
+
+def test_wrote_line_gives_forecast_step_range(tmp_path, capsys):
+    out = tmp_path / "out.zarr"
+    write_output(make_forecast(n_step=4), out, {}, None)
+    assert "step 0 days 00:00:00..3 days 00:00:00" in capsys.readouterr().err
+
+
+def test_wrote_line_prints_values_of_a_small_series(tmp_path, capsys):
+    out = tmp_path / "out.zarr"
+    ds = make_gridded(n_time=3).isel(latitude=0, longitude=0, drop=True)
+    ds["precip"].values = [0.5923, 1.0, np.nan]
+    write_output(ds, out, {}, None)
+    assert capsys.readouterr().err.endswith("\n  precip: 0.5923, 1, nan\n")
+
+
+def test_wrote_line_prints_a_scalar(tmp_path, capsys):
+    out = tmp_path / "out.zarr"
+    ds = make_gridded(n_time=1, fill=2.5).isel(time=0, latitude=0, longitude=0)
+    write_output(ds, out, {}, None)
+    assert capsys.readouterr().err.endswith("(precip mm day-1)\n  precip: 2.5\n")

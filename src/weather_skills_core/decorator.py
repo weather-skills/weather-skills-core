@@ -26,6 +26,9 @@ ARGS_ATTR = "__weather_skill_arguments__"
 # file its own arguments name. In-memory only: stripped before any output is written.
 INPUT_PATH_ATTR = "weather_skills_input_path"
 
+# A written variable this small prints its values on the Wrote line.
+SMALL_OUTPUT_VALUES = 16
+
 
 def argv_has_option(argv: list[str], option_strings) -> bool:
     """True when one of ``option_strings`` is present (bare, space, or ``--flag=``)."""
@@ -161,7 +164,7 @@ def write_output(value, out_path, history, first_ds):
             import xarray as xr
 
             provenance_mod.restamp_zarr(written, history)
-            print(f"Wrote: {out_path} ({_variable_list(xr.open_zarr(written))})", file=sys.stderr)
+            print(_wrote_line(out_path, xr.open_zarr(written)), file=sys.stderr)
         else:
             provenance_mod.stamp_figure(written, history)
             print(f"Wrote: {out_path}", file=sys.stderr)
@@ -190,13 +193,41 @@ def write_output(value, out_path, history, first_ds):
         if out_path.exists():
             shutil.rmtree(out_path)
         raise
-    print(f"Wrote: {out_path} ({_variable_list(value)})", file=sys.stderr)
+    print(_wrote_line(out_path, value), file=sys.stderr)
 
 
-def _variable_list(ds):
-    """The data variables and their units, as the Wrote line names them: ``precip mm day-1``."""
+def _wrote_line(out_path, ds):
+    """Say what was written, so a caller need not reopen the store to see its shape.
+
+    ``Wrote: PATH (precip mm day-1) time=8 latitude=7; time 2026-09-09..2026-10-28``,
+    then one line of values per numeric variable with at most one dim and
+    ``SMALL_OUTPUT_VALUES`` cells. Reads only coordinates and those few cells.
+    """
+    import numpy as np
+    import pandas as pd
+
     names = [f"{name} {ds[name].attrs.get('units', '')}".strip() for name in ds.data_vars]
-    return ", ".join(names) or "no data variables"
+    line = f"Wrote: {out_path} ({', '.join(names) or 'no data variables'})"
+    if ds.sizes:
+        line += " " + " ".join(f"{dim}={size}" for dim, size in ds.sizes.items())
+    ranges = []
+    for dim in ds.dims:
+        if dim not in ds.coords or ds.sizes[dim] < 2:
+            continue
+        values = ds[dim].values
+        if np.issubdtype(values.dtype, np.datetime64):
+            ends = [str(pd.Timestamp(v)).removesuffix(" 00:00:00") for v in (values[0], values[-1])]
+        elif np.issubdtype(values.dtype, np.timedelta64):
+            ends = [str(pd.Timedelta(v)) for v in (values[0], values[-1])]
+        else:
+            continue
+        ranges.append(f"{dim} {ends[0]}..{ends[1]}")
+    if ranges:
+        line += "; " + ", ".join(ranges)
+    for name, da in ds.data_vars.items():
+        if da.ndim <= 1 and da.size <= SMALL_OUTPUT_VALUES and np.issubdtype(da.dtype, np.number):
+            line += f"\n  {name}: " + ", ".join(f"{v:.4g}" for v in np.ravel(da.values))
+    return line
 
 
 def _open_zarr(path, io_spec=None):
