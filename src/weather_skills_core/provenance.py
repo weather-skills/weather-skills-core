@@ -427,7 +427,9 @@ def _revision_from_direct_url(source_file: Path) -> dict | None:
     """Read PEP 610 ``direct_url.json`` for the installed dist that owns ``source_file``."""
     from importlib.metadata import distributions
 
-    for dist in distributions():
+    # Search the file's own ancestors, not sys.path: a skill launched with
+    # `uv run --script` runs in a separate env that doesn't hold the dist owning it.
+    for dist in distributions(path=[str(p) for p in source_file.parents]):
         try:
             owned = any(Path(f.locate()).resolve() == source_file for f in dist.files or [])
             payload = json.loads(dist.read_text("direct_url.json") or "null") if owned else None
