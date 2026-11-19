@@ -44,12 +44,19 @@ See ``docs/weather-skill-authoring/references/UNITS.md`` for the full policy.
 from __future__ import annotations
 
 import re
+import warnings
 
-import cf_xarray.units  # noqa: F401 — CF/UDUNITS strings on the pint registry
 import numpy as np
 import pint_xarray
 
 from weather_skills_core.errors import UsageError
+
+# cf_xarray warns on import when matplotlib is absent; skills never plot through pint.
+with warnings.catch_warnings():
+    warnings.filterwarnings(
+        "ignore", message="Import\\(s\\) unavailable to set up matplotlib support"
+    )
+    import cf_xarray.units  # noqa: F401 — CF/UDUNITS strings on the pint registry
 
 ureg = pint_xarray.unit_registry
 if "pentad" not in ureg:
