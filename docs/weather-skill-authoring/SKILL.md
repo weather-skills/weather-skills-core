@@ -133,6 +133,19 @@ specific match, so do not point to other skills; when two skills look alike,
 the more specialised one says what sets it apart. Caveats, flag details, and
 pipeline rules go in Usage.
 
+**Credentials**: read them in the script with `require_env()`. List
+the env vars the skill cannot run without in `metadata.required-env`, as one
+space-separated string (`metadata` values must be strings). Leave out
+optional and alternative credentials. Describe every env var, including the
+optional ones, in `compatibility` (≤ 500 chars): what it is, where to get it,
+and when it is needed.
+
+```yaml
+compatibility: Requires Python 3.12 and uv. Requires WB_CLIENT_ID and WB_API_KEY in the environment (free trial key at https://api.windbornesystems.com/getting-started/).
+metadata:
+  required-env: "WB_CLIENT_ID WB_API_KEY"
+```
+
 **`## Usage`** (≤ 3500 chars, up to the next `##` heading):
 
 ````markdown

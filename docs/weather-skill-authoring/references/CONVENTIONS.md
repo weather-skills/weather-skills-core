@@ -105,7 +105,8 @@ pass the printed date to resolve-time as `--as-of`.
 ### `metadata.variables`
 
 On the fetcher's SKILL.md, list the exact `-v` tokens, **most-used
-first**. Names are catalog-specific (`tp` on ECMWF S2S,
+first**, as one space-separated string: the Agent Skills spec allows only
+string values under `metadata`. Names are catalog-specific (`tp` on ECMWF S2S,
 `total_precipitation` on ARCO, `precipitation_surface` on dynamical).
 Open catalogs and closed ones with many fields list the usual first
 choices, not every field the source can serve.
@@ -113,9 +114,7 @@ choices, not every field the source can serve.
 ```yaml
 metadata:
   catalog-group: fetchers
-  variables:
-    - tp
-    - t2m
+  variables: "tp t2m"
 ```
 
 ## Shared extras (not canonical)
