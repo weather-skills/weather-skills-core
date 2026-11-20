@@ -83,3 +83,19 @@ def make_station(n_station=3, n_time=2):
             "longitude": ("station_id", np.linspace(36.0, 38.0, n_station)),
         },
     )
+
+
+def make_point_obs(n_time=3, n_points=2, name="precip", fill=1.0, start="2026-01-01"):
+    """Small point_obs Dataset with point_id + time."""
+    times = np.arange(np.datetime64(start), np.datetime64(start) + np.timedelta64(n_time, "D"))
+    ds = xr.Dataset(
+        {name: (("point_id", "time"), np.full((n_points, n_time), fill))},
+        coords={
+            "point_id": [f"S{i}" for i in range(n_points)],
+            "time": times.astype("datetime64[ns]"),
+            "latitude": ("point_id", np.linspace(1.0, 2.0, n_points)),
+            "longitude": ("point_id", np.linspace(10.0, 11.0, n_points)),
+        },
+    )
+    ds[name].attrs.update(units="mm day-1", standard_name="lwe_precipitation_rate")
+    return ds
