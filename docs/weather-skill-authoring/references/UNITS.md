@@ -48,8 +48,8 @@ or `cell_methods` with `sum`).
 
 Two different clocks. Do not mix them up.
 
-**Native cell geometry** is the stretch of time each sample covers. Every
-fetcher records it in exactly one of two ways, never both:
+**Native cell geometry** is the time each sample covers. Every fetcher
+records it in one of two ways:
 
 - `data_interval` — one length for every sample (`30 minute`, `1 day`).
 - `{dim}_bounds` — a CF `(N, 2)` start and end per sample, when samples
@@ -68,8 +68,8 @@ Deaccumulate writes the same pair. Fetchers record it with
   - month starts: each label covers its own calendar month;
   - uneven forecast leads: each label ends its cell, the first starting
     at lead 0;
-  - any other uneven dates: an error, since a label could start or end
-    its cell. Pass `period=` or keep the source's bounds.
+  - other uneven dates: an error, since a label could start or end its
+    cell. Pass `period=` or keep the source's bounds.
 
 This is the **width of each cell**, not the gap between samples. Taking
 every 7th day of a daily series leaves 1-day cells, so `data_interval`

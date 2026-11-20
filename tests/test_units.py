@@ -843,6 +843,10 @@ def test_interval_days_uses_calendar_month_lengths():
     assert interval_days(ds["time"], "7 day").tolist() == [7.0, 7.0, 7.0]
     noleap = _monthly(["2024-01-01", "2024-02-01"], calendar="noleap")
     assert interval_days(noleap["time"], "1 month").tolist() == [31.0, 28.0]
+    # pint spellings of calendar periods, and a single month left after a select.
+    assert interval_days(ds["time"], "2 months")[0] == 31 + 29
+    assert interval_days(ds["time"], "1 yr")[0] == 366
+    assert interval_days(ds["time"][1], "1 month") == 29.0
 
 
 def test_interval_days_refuses_months_without_month_start_labels():
@@ -851,6 +855,8 @@ def test_interval_days_refuses_months_without_month_start_labels():
         interval_days(ds["time"], "1 month")
     with pytest.raises(UsageError):
         interval_days(xr.DataArray(0.0), "1 month")
+    with pytest.raises(UsageError, match="whole number of months"):
+        interval_days(_monthly(["2024-01-01"])["time"], "1.5 month")
 
 
 def test_rate_to_total_multiplies_each_month_by_its_length():

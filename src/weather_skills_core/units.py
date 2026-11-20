@@ -382,24 +382,19 @@ def _axis_tick_diffs(values):
     raise UsageError(f"could not infer spacing: {failure}")
 
 
-def _all_month_starts(index) -> bool:
-    """Every label is midnight on the 1st (datetime64 or cftime index)."""
-    return bool(
-        (
-            (np.asarray(index.day) == 1)
-            & (np.asarray(index.hour) == 0)
-            & (np.asarray(index.minute) == 0)
-            & (np.asarray(index.second) == 0)
-        ).all()
-    )
-
-
 def _calendar_months(period: str) -> int | None:
-    """Months in a calendar period (``"N month"``, ``"N year"``), or None for a fixed one."""
-    match = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
-    if match is None:
+    """Whole months in a calendar period (``"1 month"``, ``"3 months"``, ``"1 yr"``).
+
+    None for a fixed-length period (``"7 day"``). pint gives month and year
+    average lengths, so a calendar period is told apart by its unit, not its value.
+    """
+    q = parse_aggregation_period(period)
+    if str(q.units) not in ("month", "year"):
         return None
-    return int(match.group(1)) * (12 if match.group(2) == "year" else 1)
+    months = float(q.to("month").magnitude)
+    if months <= 0 or not months.is_integer():
+        raise UsageError(f"calendar period {period!r} must be a whole number of months")
+    return int(months)
 
 
 def interval_days(coord, period: str):
@@ -417,16 +412,11 @@ def interval_days(coord, period: str):
     if months is None:
         days = float(parse_aggregation_period(period).to("day").magnitude)
         return np.full(np.shape(coord), days)
-    index = coord.to_index() if coord.ndim else None
-    if index is None or not hasattr(index, "shift") or not hasattr(index, "day"):
-        raise UsageError(
-            f"aggregation_period {period!r} needs datetime labels to know each "
-            "month's length; convert before collapsing the time axis"
-        )
-    if not _all_month_starts(index):
-        raise UsageError(f"aggregation_period {period!r} needs month-start labels")
-    lengths = pd.to_timedelta(np.asarray(index.shift(months, "MS") - index))
-    return np.asarray(lengths / pd.Timedelta(days=1), dtype=float)
+    cells = _month_start_cells(coord.values, months)
+    if cells is None:
+        raise UsageError(f"aggregation_period {period!r} needs month-start date labels")
+    lengths = pd.to_timedelta(cells[:, 1] - cells[:, 0]) / pd.Timedelta(days=1)
+    return np.asarray(lengths, dtype=float).reshape(np.shape(coord))
 
 
 def assert_nonoverlapping_intervals(ds, dim: str, period: str) -> None:
@@ -807,7 +797,7 @@ def stamp_data_interval(ds, period=None, dim=None):
         if months is None:
             period = format_duration(parse_aggregation_period(period))
             return _apply_scalar_interval(ds, period, axis=axis)
-        cells = _month_start_cells(ds, axis, months)
+        cells = _month_start_cells(ds[axis].values, months) if axis else None
         if cells is None:
             raise UsageError(f"period {period!r} needs a date axis of month-start labels")
         return _apply_bounds(ds, axis, cells)
@@ -822,7 +812,7 @@ def stamp_data_interval(ds, period=None, dim=None):
         raise UsageError(f"cannot stamp data_interval: empty {axis!r} axis")
     if ticks.size == 1:
         return ds
-    cells = _month_start_cells(ds, axis)
+    cells = _month_start_cells(ticks)
     if cells is not None:
         return _apply_bounds(ds, axis, cells)
     diffs, unit = _axis_tick_diffs(ticks)
@@ -847,17 +837,28 @@ def stamp_data_interval(ds, period=None, dim=None):
     return _apply_bounds(ds, axis, np.stack([starts, ticks], axis=1))
 
 
-def _month_start_cells(ds, axis, months=None):
-    """``(N, 2)`` cells from each month-start label to the label ``months`` on, or None.
+def _month_start_cells(values, months=None):
+    """``(N, 2)`` start/end per label when every label is midnight on the 1st, else None.
 
-    Without ``months``, the labels must be whole months apart and the smallest
-    gap is used. None when the axis is not dates or any label is not midnight
-    on the 1st.
+    Each cell runs ``months`` on from its label. Without ``months``, the labels
+    must be whole months apart and the smallest gap is used. Works for
+    datetime64 and cftime labels, scalar or array.
     """
-    index = ds.indexes.get(axis)
-    if index is None or not hasattr(index, "shift") or not hasattr(index, "month"):
+    import pandas as pd
+    import xarray as xr
+
+    values = np.atleast_1d(np.asarray(values))
+    if np.issubdtype(values.dtype, np.datetime64):
+        index = pd.DatetimeIndex(values)
+    elif values.dtype == object:
+        try:
+            index = xr.CFTimeIndex(values)
+        except (TypeError, ValueError):
+            return None
+    else:
         return None
-    if not _all_month_starts(index):
+    on_first = (index.day == 1) & (index.hour == 0) & (index.minute == 0) & (index.second == 0)
+    if not np.all(on_first):
         return None
     if months is None:
         gaps = np.diff(np.asarray(index.year) * 12 + np.asarray(index.month))
