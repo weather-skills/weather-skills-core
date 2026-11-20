@@ -1,5 +1,6 @@
 """Tests for units equivalence, quantify, aggregation_period, and standard conversion."""
 
+import cftime
 import numpy as np
 import pytest
 import xarray as xr
@@ -535,40 +536,48 @@ def _cells(ds):
     return [[str(t)[:10] for t in pair] for pair in ds["time_bounds"].values]
 
 
-def test_stamp_data_interval_month_starts_get_their_own_month():
-    """Each month-start label covers its own calendar month, not the one before."""
-    out = stamp_data_interval(
-        _month_series(["2019-12-01", "2020-01-01", "2020-02-01", "2020-03-01"])
-    )
+@pytest.mark.parametrize(
+    "dates, cells",
+    [
+        # Each month start covers its own calendar month, not the one before.
+        (
+            ["2019-12-01", "2020-01-01", "2020-02-01"],
+            [
+                ["2019-12-01", "2020-01-01"],
+                ["2020-01-01", "2020-02-01"],
+                ["2020-02-01", "2020-03-01"],
+            ],
+        ),
+        # Two month starts are evenly spaced, but still one month each, not '31 day'.
+        (
+            ["2026-01-01", "2026-02-01"],
+            [["2026-01-01", "2026-02-01"], ["2026-02-01", "2026-03-01"]],
+        ),
+        # A missing month is a missing sample, not a two-month cell.
+        (
+            ["2026-01-01", "2026-02-01", "2026-04-01"],
+            [
+                ["2026-01-01", "2026-02-01"],
+                ["2026-02-01", "2026-03-01"],
+                ["2026-04-01", "2026-05-01"],
+            ],
+        ),
+        # Year starts cover their year.
+        (
+            ["2020-01-01", "2021-01-01", "2023-01-01"],
+            [
+                ["2020-01-01", "2021-01-01"],
+                ["2021-01-01", "2022-01-01"],
+                ["2023-01-01", "2024-01-01"],
+            ],
+        ),
+    ],
+)
+def test_stamp_data_interval_month_starts_get_calendar_cells(dates, cells):
+    out = stamp_data_interval(_month_series(dates))
     assert DATA_INTERVAL_ATTR not in out["index"].attrs
     assert out["time"].attrs["bounds"] == "time_bounds"
-    assert _cells(out) == [
-        ["2019-12-01", "2020-01-01"],
-        ["2020-01-01", "2020-02-01"],
-        ["2020-02-01", "2020-03-01"],
-        ["2020-03-01", "2020-04-01"],
-    ]
-
-
-def test_stamp_data_interval_two_month_starts_are_months_not_days():
-    """Two month starts are evenly spaced, but still one month each, not '31 day'."""
-    out = stamp_data_interval(_month_series(["2026-01-01", "2026-02-01"]))
-    assert _cells(out) == [["2026-01-01", "2026-02-01"], ["2026-02-01", "2026-03-01"]]
-
-
-def test_stamp_data_interval_missing_month_stays_one_month():
-    """A missing month is a missing sample, not a two-month cell."""
-    out = stamp_data_interval(_month_series(["2026-01-01", "2026-02-01", "2026-04-01"]))
-    assert _cells(out)[1:] == [["2026-02-01", "2026-03-01"], ["2026-04-01", "2026-05-01"]]
-
-
-def test_stamp_data_interval_year_starts_cover_their_year():
-    out = stamp_data_interval(_month_series(["2020-01-01", "2021-01-01", "2023-01-01"]))
-    assert _cells(out) == [
-        ["2020-01-01", "2021-01-01"],
-        ["2021-01-01", "2022-01-01"],
-        ["2023-01-01", "2024-01-01"],
-    ]
+    assert _cells(out) == cells
 
 
 def test_stamp_data_interval_cftime_month_starts():
@@ -595,6 +604,9 @@ def test_stamp_data_interval_mid_month_dates_refuse_to_guess():
     """Mid-month labels (as in CMIP6 monthly means) are uneven and not month starts."""
     with pytest.raises(UsageError, match="irregular 'time' dates"):
         stamp_data_interval(_month_series(["2026-01-16", "2026-02-15", "2026-03-16"]))
+    noleap = [cftime.DatetimeNoLeap(2026, m, d) for m, d in ((1, 16), (2, 15), (3, 16), (4, 16))]
+    with pytest.raises(UsageError, match="irregular 'time' dates"):
+        stamp_data_interval(_month_series(None, times=np.array(noleap, dtype=object)))
 
 
 def test_stamp_data_interval_datetime_gaps_stay_regular():

@@ -382,6 +382,18 @@ def _axis_tick_diffs(values):
     raise UsageError(f"could not infer spacing: {failure}")
 
 
+def _all_month_starts(index) -> bool:
+    """Every label is midnight on the 1st (datetime64 or cftime index)."""
+    return bool(
+        (
+            (np.asarray(index.day) == 1)
+            & (np.asarray(index.hour) == 0)
+            & (np.asarray(index.minute) == 0)
+            & (np.asarray(index.second) == 0)
+        ).all()
+    )
+
+
 def _calendar_months(period: str) -> int | None:
     """Months in a calendar period (``"N month"``, ``"N year"``), or None for a fixed one."""
     match = re.fullmatch(r"\s*(\d+)\s*(month|year)s?\s*", period)
@@ -411,7 +423,7 @@ def interval_days(coord, period: str):
             f"aggregation_period {period!r} needs datetime labels to know each "
             "month's length; convert before collapsing the time axis"
         )
-    if not (np.asarray(index.day) == 1).all():
+    if not _all_month_starts(index):
         raise UsageError(f"aggregation_period {period!r} needs month-start labels")
     lengths = pd.to_timedelta(np.asarray(index.shift(months, "MS") - index))
     return np.asarray(lengths / pd.Timedelta(days=1), dtype=float)
@@ -792,15 +804,13 @@ def stamp_data_interval(ds, period=None, dim=None):
         except UsageError:
             axis = None
         months = _calendar_months(period)
-        if months is not None:
-            cells = _month_start_cells(ds, axis, months) if axis is not None else None
-            if cells is None:
-                raise UsageError(
-                    f"data_interval {period!r} needs a date axis of month-start labels"
-                )
-            return _apply_bounds(ds, axis, cells)
-        period = format_duration(parse_aggregation_period(period))
-        return _apply_scalar_interval(ds, period, axis=axis)
+        if months is None:
+            period = format_duration(parse_aggregation_period(period))
+            return _apply_scalar_interval(ds, period, axis=axis)
+        cells = _month_start_cells(ds, axis, months)
+        if cells is None:
+            raise UsageError(f"period {period!r} needs a date axis of month-start labels")
+        return _apply_bounds(ds, axis, cells)
 
     axis = _time_or_step_dim(ds, dim)
     if axis is None:
@@ -828,16 +838,12 @@ def stamp_data_interval(ds, period=None, dim=None):
     ):
         period = format_duration(ureg.Quantity(float(base), unit).to("day"))
         return _apply_scalar_interval(ds, period, axis=axis)
-    if np.issubdtype(ticks.dtype, np.datetime64):
+    if not np.issubdtype(ticks.dtype, np.timedelta64):
         raise UsageError(
             f"irregular {axis!r} dates: cannot tell whether each label starts or ends "
             f"its cell; pass period= or write {axis}_bounds"
         )
-
-    first_start = _default_bounds_origin(ticks)
-    if first_start is None:
-        raise UsageError(f"irregular {axis!r} axis: cannot infer where the first cell starts")
-    starts = np.concatenate([[first_start], ticks[:-1]]).astype(ticks.dtype)
+    starts = np.concatenate([[np.timedelta64(0)], ticks[:-1]]).astype(ticks.dtype)
     return _apply_bounds(ds, axis, np.stack([starts, ticks], axis=1))
 
 
@@ -851,13 +857,7 @@ def _month_start_cells(ds, axis, months=None):
     index = ds.indexes.get(axis)
     if index is None or not hasattr(index, "shift") or not hasattr(index, "month"):
         return None
-    midnight_on_1st = (
-        (np.asarray(index.day) == 1)
-        & (np.asarray(index.hour) == 0)
-        & (np.asarray(index.minute) == 0)
-        & (np.asarray(index.second) == 0)
-    )
-    if not midnight_on_1st.all():
+    if not _all_month_starts(index):
         return None
     if months is None:
         gaps = np.diff(np.asarray(index.year) * 12 + np.asarray(index.month))
@@ -865,21 +865,6 @@ def _month_start_cells(ds, axis, months=None):
             return None
         months = int(gaps.min())
     return np.stack([np.asarray(index), np.asarray(index.shift(months, "MS"))], axis=1)
-
-
-def _default_bounds_origin(values):
-    """Left edge of the first right-labeled cell, or None if it cannot be inferred."""
-    values = np.asarray(values)
-    if values.size < 2:
-        return None
-    if np.issubdtype(values.dtype, np.timedelta64):
-        return np.asarray(0).astype(values.dtype)
-    first = values.flat[0]
-    second = values.flat[1]
-    try:
-        return first - (second - first)
-    except TypeError:
-        return None
 
 
 def expected_samples_in_period(aggregation_period: str, data_interval: str) -> int:

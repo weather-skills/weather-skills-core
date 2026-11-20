@@ -48,22 +48,28 @@ or `cell_methods` with `sum`).
 
 Two different clocks. Do not mix them up.
 
-**Native cell geometry** is what the source actually sampled. Fetch
-stamps exactly one of:
+**Native cell geometry** is the stretch of time each sample covers. Every
+fetcher records it in exactly one of two ways, never both:
 
-- `data_interval` — uniform spacing as a pint string (`30 minute`,
-  `1 day`)
-- `{dim}_bounds` — CF `(N, 2)` start/end per sample, when spacing is
-  irregular or calendar-based (monthly or yearly data)
+- `data_interval` — one length for every sample (`30 minute`, `1 day`).
+- `{dim}_bounds` — a CF `(N, 2)` start and end per sample, when samples
+  differ in length: calendar months and years, or forecast leads that go
+  from 3- to 6-hourly.
 
-A fetcher that knows its cells passes `period=` (`"1 day"`, or `"1 month"`
-for month-start labels, which becomes bounds with each month's real length)
-or keeps the source's own bounds. Inference is a fallback: month-start
-dates get their own calendar month, evenly spaced dates get
-`data_interval`, and other uneven dates are refused, since a label could
-start or end its cell.
+Deaccumulate writes the same pair. Fetchers record it with
+`stamp_data_interval`:
 
-Never both. Deaccumulate uses the same pair.
+- The source has its own bounds: keep them.
+- The fetcher knows the length: pass `period=`. `"1 day"` writes
+  `data_interval`; `"1 month"` or `"1 year"` writes bounds with each
+  month's real length and needs labels on the 1st of the month.
+- Otherwise it is inferred from the labels:
+  - evenly spaced (missing rows allowed): `data_interval`;
+  - month starts: each label covers its own calendar month;
+  - uneven forecast leads: each label ends its cell, the first starting
+    at lead 0;
+  - any other uneven dates: an error, since a label could start or end
+    its cell. Pass `period=` or keep the source's bounds.
 
 This is the **width of each cell**, not the gap between samples. Taking
 every 7th day of a daily series leaves 1-day cells, so `data_interval`
