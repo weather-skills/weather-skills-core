@@ -466,7 +466,7 @@ def test_stamp_data_interval_many_inits_uses_the_lead_spacing():
 
 
 def test_stamp_data_interval_irregular_step_writes_cf_bounds():
-    """Irregular step with no existing geometry writes CF bounds."""
+    """Irregular step writes CF bounds with each lead starting its cell, as even leads do."""
     days = np.array([7, 10, 14, 21], dtype="timedelta64[D]").astype("timedelta64[ns]")
     ds = xr.Dataset(
         {"tp": (("step",), np.ones(4), {"units": "mm day-1"})},
@@ -477,11 +477,38 @@ def test_stamp_data_interval_irregular_step_writes_cf_bounds():
     assert out["step"].attrs["bounds"] == "step_bounds"
     bounds = np.asarray(out["step_bounds"].values)
     assert bounds.shape == (4, 2)
-    np.testing.assert_array_equal(bounds[:, 1], days)
+    np.testing.assert_array_equal(bounds[:, 0], days)
     np.testing.assert_array_equal(
-        bounds[:, 0],
-        np.array([0, 7, 10, 14], dtype="timedelta64[D]").astype("timedelta64[ns]"),
+        bounds[:, 1],
+        np.array([10, 14, 21, 28], dtype="timedelta64[D]").astype("timedelta64[ns]"),
     )
+
+
+def test_stamp_data_interval_lead_cells_do_not_depend_on_cut():
+    """A 3-then-6-hourly forecast gives the 24-36 h leads the same cells whether or not
+    the 3-hourly leads were cut off."""
+    hours = np.array([0, 3, 6, 9, 12, 18, 24, 30, 36], dtype="timedelta64[h]").astype(
+        "timedelta64[ns]"
+    )
+    ds = xr.Dataset(
+        {"tp": (("step",), np.ones(hours.size), {"units": "mm day-1"})},
+        coords={"step": hours},
+    )
+    uneven = stamp_data_interval(ds)["step_bounds"].sel(step=hours[-3:]).values
+    even = stamp_data_interval(ds.isel(step=slice(-3, None)))
+    assert even["tp"].attrs[DATA_INTERVAL_ATTR] == "6 hour"
+    np.testing.assert_array_equal(uneven[:, 0], hours[-3:])
+    np.testing.assert_array_equal(uneven[:, 1] - uneven[:, 0], np.timedelta64(6, "h"))
+
+
+@pytest.mark.parametrize("calendar", ["360_day", "noleap"])
+def test_infer_spacing_cftime_across_february(calendar):
+    """Daily cftime dates through February (30 Feb in 360_day) are 1 day apart in their
+    own calendar, even where that date does not exist in the standard one."""
+    times = xr.date_range("2024-02-25", periods=10, freq="D", calendar=calendar, use_cftime=True)
+    ds = xr.Dataset({"tas": (("time",), np.ones(10), {"units": "K"})}, coords={"time": times})
+    assert infer_timestep(ds, "time").to("day").magnitude == 1
+    assert stamp_data_interval(ds)["tas"].attrs[DATA_INTERVAL_ATTR] == "1 day"
 
 
 def test_stamp_data_interval_keeps_existing_when_ticks_would_differ():
