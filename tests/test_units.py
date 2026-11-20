@@ -1,5 +1,6 @@
 """Tests for units equivalence, quantify, aggregation_period, and standard conversion."""
 
+import cftime
 import numpy as np
 import pytest
 import xarray as xr
@@ -377,15 +378,25 @@ def test_format_duration_subday():
 
 def test_stamp_data_interval_explicit_and_inferred():
     """An explicit period stamps; otherwise daily spacing is inferred."""
-    ds = make_gridded(n_time=2)
-    stamp_data_interval(ds, period="30 minute")
+    ds = stamp_data_interval(make_gridded(n_time=2), period="30 minute")
     assert ds["precip"].attrs[DATA_INTERVAL_ATTR] == "30 minute"
     assert AGGREGATION_PERIOD_ATTR not in ds["precip"].attrs
     assert AGGREGATION_COVERAGE_COORD not in ds.coords
 
-    daily = make_gridded(n_time=3)
-    stamp_data_interval(daily)
+    daily = stamp_data_interval(make_gridded(n_time=3))
     assert daily["precip"].attrs[DATA_INTERVAL_ATTR] == "1 day"
+
+
+def test_stamp_data_interval_leaves_input_unchanged():
+    """The input keeps its attrs and coords; only the returned dataset is stamped."""
+    ds = make_gridded(n_time=3)
+    stamp_data_interval(ds, period="30 minute")
+    stamp_data_interval(ds)
+    assert DATA_INTERVAL_ATTR not in ds["precip"].attrs
+    monthly = _month_series(["2026-01-01", "2026-02-01", "2026-03-01"])
+    stamp_data_interval(monthly)
+    assert "time_bounds" not in monthly
+    assert "bounds" not in monthly["time"].attrs
 
 
 def test_deaccumulate_two_steps_stamps_the_one_remaining_cell():
@@ -505,8 +516,8 @@ def test_deaccumulate_origin_restamps_existing_interval():
     assert out["tp"].attrs[DATA_INTERVAL_ATTR] == "1 day"
 
 
-def test_stamp_data_interval_irregular_datetime_defaults_origin():
-    """Irregular times bound the first bin from midnight of that day."""
+def test_stamp_data_interval_irregular_dates_refuse_to_guess():
+    """A label could start or end its cell, so uneven dates need a stated period."""
     times = np.array(
         ["2026-08-18T03:00", "2026-08-18T06:00", "2026-08-18T10:00"],
         dtype="datetime64[ns]",
@@ -515,10 +526,89 @@ def test_stamp_data_interval_irregular_datetime_defaults_origin():
         {"tp": (("time",), np.ones(3), {"units": "mm day-1"})},
         coords={"time": times},
     )
-    out = stamp_data_interval(ds)
-    bounds = np.asarray(out["time_bounds"].values)
-    assert bounds[0, 0] == np.datetime64("2026-08-18T00:00")
-    assert bounds[0, 1] == times[0]
+    with pytest.raises(UsageError, match="irregular 'time' dates"):
+        stamp_data_interval(ds)
+    assert stamp_data_interval(ds, period="1 hour")["tp"].attrs[DATA_INTERVAL_ATTR] == "1 hour"
+
+
+def _month_series(dates, times=None):
+    times = np.array(dates, dtype="datetime64[ns]") if times is None else times
+    return xr.Dataset(
+        {"index": (("time",), np.arange(len(times), dtype=float), {"units": "degree_Celsius"})},
+        coords={"time": times},
+    )
+
+
+def _cells(ds):
+    return [[str(t)[:10] for t in pair] for pair in ds["time_bounds"].values]
+
+
+@pytest.mark.parametrize(
+    "dates, cells",
+    [
+        # Each month start covers its own calendar month, not the one before.
+        (
+            ["2019-12-01", "2020-01-01", "2020-02-01"],
+            [
+                ["2019-12-01", "2020-01-01"],
+                ["2020-01-01", "2020-02-01"],
+                ["2020-02-01", "2020-03-01"],
+            ],
+        ),
+        # Quarter starts cover their quarter.
+        (
+            ["2026-01-01", "2026-04-01", "2026-07-01"],
+            [
+                ["2026-01-01", "2026-04-01"],
+                ["2026-04-01", "2026-07-01"],
+                ["2026-07-01", "2026-10-01"],
+            ],
+        ),
+        # Year starts cover their year.
+        (
+            ["2020-01-01", "2021-01-01", "2022-01-01"],
+            [
+                ["2020-01-01", "2021-01-01"],
+                ["2021-01-01", "2022-01-01"],
+                ["2022-01-01", "2023-01-01"],
+            ],
+        ),
+    ],
+)
+def test_stamp_data_interval_calendar_steps_get_calendar_cells(dates, cells):
+    out = stamp_data_interval(_month_series(dates))
+    assert DATA_INTERVAL_ATTR not in out["index"].attrs
+    assert out["time"].attrs["bounds"] == "time_bounds"
+    assert _cells(out) == cells
+
+
+def test_stamp_data_interval_cftime_month_starts():
+    """noleap month starts get calendar months too."""
+    times = xr.date_range("2026-01-01", periods=3, freq="MS", calendar="noleap", use_cftime=True)
+    out = stamp_data_interval(_month_series(None, times=times))
+    assert [[t.strftime("%Y-%m-%d") for t in pair] for pair in out["time_bounds"].values] == [
+        ["2026-01-01", "2026-02-01"],
+        ["2026-02-01", "2026-03-01"],
+        ["2026-03-01", "2026-04-01"],
+    ]
+
+
+def test_stamp_data_interval_explicit_calendar_period_writes_bounds():
+    """period='3 month' keeps calendar lengths instead of a fixed number of minutes."""
+    out = stamp_data_interval(_month_series(["2026-01-01", "2026-04-01"]), period="3 month")
+    assert DATA_INTERVAL_ATTR not in out["index"].attrs
+    assert _cells(out) == [["2026-01-01", "2026-04-01"], ["2026-04-01", "2026-07-01"]]
+    with pytest.raises(UsageError, match="month-start labels"):
+        stamp_data_interval(_month_series(["2026-01-15", "2026-02-15"]), period="1 month")
+
+
+def test_stamp_data_interval_mid_month_dates_refuse_to_guess():
+    """Mid-month labels (as in CMIP6 monthly means) are uneven and not month starts."""
+    with pytest.raises(UsageError, match="irregular 'time' dates"):
+        stamp_data_interval(_month_series(["2026-01-16", "2026-02-15", "2026-03-16"]))
+    noleap = [cftime.DatetimeNoLeap(2026, m, d) for m, d in ((1, 16), (2, 15), (3, 16), (4, 16))]
+    with pytest.raises(UsageError, match="irregular 'time' dates"):
+        stamp_data_interval(_month_series(None, times=np.array(noleap, dtype=object)))
 
 
 def test_stamp_data_interval_datetime_gaps_stay_regular():
@@ -755,6 +845,10 @@ def test_interval_days_uses_calendar_month_lengths():
     assert interval_days(ds["time"], "7 day").tolist() == [7.0, 7.0, 7.0]
     noleap = _monthly(["2024-01-01", "2024-02-01"], calendar="noleap")
     assert interval_days(noleap["time"], "1 month").tolist() == [31.0, 28.0]
+    # pint spellings of calendar periods, and a single month left after a select.
+    assert interval_days(ds["time"], "2 months")[0] == 31 + 29
+    assert interval_days(ds["time"], "1 yr")[0] == 366
+    assert interval_days(ds["time"][1], "1 month") == 29.0
 
 
 def test_interval_days_refuses_months_without_month_start_labels():
@@ -763,6 +857,8 @@ def test_interval_days_refuses_months_without_month_start_labels():
         interval_days(ds["time"], "1 month")
     with pytest.raises(UsageError):
         interval_days(xr.DataArray(0.0), "1 month")
+    with pytest.raises(UsageError, match="whole number of months"):
+        interval_days(_monthly(["2024-01-01"])["time"], "1.5 month")
 
 
 def test_rate_to_total_multiplies_each_month_by_its_length():
@@ -874,3 +970,14 @@ def test_to_standard_units_keeps_coord_units_on_quantified_dataset():
     assert units_equal(str(out["precip"].pint.units), "mm day-1")
     np.testing.assert_allclose(out["precip"].pint.magnitude, make_gridded()["precip"], rtol=1e-6)
     assert out["latitude"].attrs["units"] == "degrees_north"
+
+
+def test_stamp_data_interval_month_starts_with_a_gap_need_a_period():
+    """A missing month leaves no regular step to infer; period='1 month' states it."""
+    ds = _month_series(["2026-01-01", "2026-02-01", "2026-04-01"])
+    with pytest.raises(UsageError, match="irregular 'time' dates"):
+        stamp_data_interval(ds)
+    assert _cells(stamp_data_interval(ds, period="1 month"))[1:] == [
+        ["2026-02-01", "2026-03-01"],
+        ["2026-04-01", "2026-05-01"],
+    ]
