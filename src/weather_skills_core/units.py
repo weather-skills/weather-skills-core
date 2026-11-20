@@ -412,7 +412,7 @@ def interval_days(coord, period: str):
     if months is None:
         days = float(parse_aggregation_period(period).to("day").magnitude)
         return np.full(np.shape(coord), days)
-    cells = _month_start_cells(coord.values, months)
+    cells = _calendar_cells(coord.values, months)
     if cells is None:
         raise UsageError(f"aggregation_period {period!r} needs month-start date labels")
     lengths = pd.to_timedelta(cells[:, 1] - cells[:, 0]) / pd.Timedelta(days=1)
@@ -776,8 +776,8 @@ def stamp_data_interval(ds, period=None, dim=None):
     Without it, an existing ``data_interval`` or CF bounds is kept; otherwise
     the spacing of ``dim`` (or ``time`` / ``step``) is inferred:
 
-    - Dates that are all month starts, whole months apart, get bounds from
-      each label to the label N months on (N the smallest gap).
+    - Dates on a regular calendar step (month, quarter or year starts) get
+      bounds from each label to the next step.
     - Even spacing gets ``data_interval``, as does a date axis with missing
       rows (every spacing a whole multiple of the smallest).
     - Other uneven dates raise: a label could start or end its cell, so the
@@ -797,7 +797,7 @@ def stamp_data_interval(ds, period=None, dim=None):
         if months is None:
             period = format_duration(parse_aggregation_period(period))
             return _apply_scalar_interval(ds, period, axis=axis)
-        cells = _month_start_cells(ds[axis].values, months) if axis else None
+        cells = _calendar_cells(ds[axis].values, months) if axis else None
         if cells is None:
             raise UsageError(f"period {period!r} needs a date axis of month-start labels")
         return _apply_bounds(ds, axis, cells)
@@ -812,7 +812,7 @@ def stamp_data_interval(ds, period=None, dim=None):
         raise UsageError(f"cannot stamp data_interval: empty {axis!r} axis")
     if ticks.size == 1:
         return ds
-    cells = _month_start_cells(ticks)
+    cells = _calendar_cells(ticks)
     if cells is not None:
         return _apply_bounds(ds, axis, cells)
     diffs, unit = _axis_tick_diffs(ticks)
@@ -837,15 +837,18 @@ def stamp_data_interval(ds, period=None, dim=None):
     return _apply_bounds(ds, axis, np.stack([starts, ticks], axis=1))
 
 
-def _month_start_cells(values, months=None):
-    """``(N, 2)`` start/end per label when every label is midnight on the 1st, else None.
+def _calendar_cells(values, months=None):
+    """``(N, 2)`` start/end per date label for calendar steps, else None.
 
-    Each cell runs ``months`` on from its label. Without ``months``, the labels
-    must be whole months apart and the smallest gap is used. Works for
-    datetime64 and cftime labels, scalar or array.
+    With ``months``, each label must start a month and its cell runs that many
+    months on. Without, the step is the labels' own frequency, kept only when it
+    is a calendar one (months, quarters, years). Works for datetime64 and cftime
+    labels, scalar or array.
     """
     import pandas as pd
     import xarray as xr
+    from pandas.tseries.frequencies import to_offset
+    from pandas.tseries.offsets import MonthBegin, QuarterBegin, YearBegin
 
     values = np.atleast_1d(np.asarray(values))
     if np.issubdtype(values.dtype, np.datetime64):
@@ -857,14 +860,13 @@ def _month_start_cells(values, months=None):
             return None
     else:
         return None
-    on_first = (index.day == 1) & (index.hour == 0) & (index.minute == 0) & (index.second == 0)
-    if not np.all(on_first):
-        return None
     if months is None:
-        gaps = np.diff(np.asarray(index.year) * 12 + np.asarray(index.month))
-        if gaps.size == 0 or gaps.min() <= 0 or np.any(gaps % gaps.min()):
+        freq = xr.infer_freq(index) if index.size >= 3 else None
+        if freq is None or not isinstance(to_offset(freq), (MonthBegin, QuarterBegin, YearBegin)):
             return None
-        months = int(gaps.min())
+        return np.stack([np.asarray(index), np.asarray(index.shift(1, freq))], axis=1)
+    if not (index.shift(1, "MS").shift(-1, "MS") == index).all():
+        return None
     return np.stack([np.asarray(index), np.asarray(index.shift(months, "MS"))], axis=1)
 
 

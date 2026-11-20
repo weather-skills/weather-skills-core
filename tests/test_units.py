@@ -548,32 +548,27 @@ def _cells(ds):
                 ["2020-02-01", "2020-03-01"],
             ],
         ),
-        # Two month starts are evenly spaced, but still one month each, not '31 day'.
+        # Quarter starts cover their quarter.
         (
-            ["2026-01-01", "2026-02-01"],
-            [["2026-01-01", "2026-02-01"], ["2026-02-01", "2026-03-01"]],
-        ),
-        # A missing month is a missing sample, not a two-month cell.
-        (
-            ["2026-01-01", "2026-02-01", "2026-04-01"],
+            ["2026-01-01", "2026-04-01", "2026-07-01"],
             [
-                ["2026-01-01", "2026-02-01"],
-                ["2026-02-01", "2026-03-01"],
-                ["2026-04-01", "2026-05-01"],
+                ["2026-01-01", "2026-04-01"],
+                ["2026-04-01", "2026-07-01"],
+                ["2026-07-01", "2026-10-01"],
             ],
         ),
         # Year starts cover their year.
         (
-            ["2020-01-01", "2021-01-01", "2023-01-01"],
+            ["2020-01-01", "2021-01-01", "2022-01-01"],
             [
                 ["2020-01-01", "2021-01-01"],
                 ["2021-01-01", "2022-01-01"],
-                ["2023-01-01", "2024-01-01"],
+                ["2022-01-01", "2023-01-01"],
             ],
         ),
     ],
 )
-def test_stamp_data_interval_month_starts_get_calendar_cells(dates, cells):
+def test_stamp_data_interval_calendar_steps_get_calendar_cells(dates, cells):
     out = stamp_data_interval(_month_series(dates))
     assert DATA_INTERVAL_ATTR not in out["index"].attrs
     assert out["time"].attrs["bounds"] == "time_bounds"
@@ -968,3 +963,14 @@ def test_to_standard_units_keeps_coord_units_on_quantified_dataset():
     assert units_equal(str(out["precip"].pint.units), "mm day-1")
     np.testing.assert_allclose(out["precip"].pint.magnitude, make_gridded()["precip"], rtol=1e-6)
     assert out["latitude"].attrs["units"] == "degrees_north"
+
+
+def test_stamp_data_interval_month_starts_with_a_gap_need_a_period():
+    """A missing month leaves no regular step to infer; period='1 month' states it."""
+    ds = _month_series(["2026-01-01", "2026-02-01", "2026-04-01"])
+    with pytest.raises(UsageError, match="irregular 'time' dates"):
+        stamp_data_interval(ds)
+    assert _cells(stamp_data_interval(ds, period="1 month"))[1:] == [
+        ["2026-02-01", "2026-03-01"],
+        ["2026-04-01", "2026-05-01"],
+    ]

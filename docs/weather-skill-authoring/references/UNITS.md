@@ -65,7 +65,8 @@ Deaccumulate writes the same pair. Fetchers record it with
   month's real length and needs labels on the 1st of the month.
 - Otherwise it is inferred from the labels:
   - evenly spaced (missing rows allowed): `data_interval`;
-  - month starts: each label covers its own calendar month;
+  - month, quarter or year starts with no gaps: each label covers its own
+    calendar step;
   - uneven forecast leads: each label ends its cell, the first starting
     at lead 0;
   - other uneven dates: an error, since a label could start or end its
