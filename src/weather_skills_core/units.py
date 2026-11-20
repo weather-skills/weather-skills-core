@@ -378,6 +378,11 @@ def _axis_tick_diffs(values):
         unit, _ = np.datetime_data(values.dtype)
         diffs = np.diff(values.astype(values.dtype).astype(np.int64))
         return diffs, unit
+    try:
+        # cftime dates subtract to timedeltas in their own calendar (360_day has 30 Feb).
+        return np.diff(values).astype("timedelta64[ns]").astype(np.int64), "nanosecond"
+    except (TypeError, ValueError):
+        pass
     failure = None
     for dtype in ("datetime64[ns]", "timedelta64[ns]"):
         try:
@@ -802,7 +807,8 @@ def stamp_data_interval(ds, period=None, dim=None):
     - Other uneven dates raise: a label could start or end its cell, so the
       caller must pass ``period`` or write bounds.
     - Other uneven leads (forecast steps going from 3- to 6-hourly) get
-      ``{dim}_bounds`` with each label at the end of its cell.
+      ``{dim}_bounds`` with each label starting its cell, as evenly spaced
+      leads do; the last cell is as long as the last spacing.
 
     A one-sample axis is left alone. The input dataset is not modified.
     """
@@ -852,8 +858,8 @@ def stamp_data_interval(ds, period=None, dim=None):
             f"irregular {axis!r} dates: cannot tell whether each label starts or ends "
             f"its cell; pass period= or write {axis}_bounds"
         )
-    starts = np.concatenate([[np.timedelta64(0)], ticks[:-1]]).astype(ticks.dtype)
-    return _apply_bounds(ds, axis, np.stack([starts, ticks], axis=1))
+    ends = np.append(ticks[1:], ticks[-1] + (ticks[-1] - ticks[-2]))
+    return _apply_bounds(ds, axis, np.stack([ticks, ends], axis=1))
 
 
 def _calendar_cells(values, months=None):

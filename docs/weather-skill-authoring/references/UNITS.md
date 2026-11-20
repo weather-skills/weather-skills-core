@@ -67,8 +67,9 @@ Deaccumulate writes the same pair. Fetchers record it with
   - evenly spaced (missing rows allowed): `data_interval`;
   - month, quarter or year starts with no gaps: each label covers its own
     calendar step;
-  - uneven forecast leads: each label ends its cell, the first starting
-    at lead 0;
+  - uneven forecast leads: each label starts its cell, which runs to the
+    next lead (the last as long as the last spacing), as evenly spaced
+    leads do;
   - other uneven dates: an error, since a label could start or end its
     cell. Pass `period=` or keep the source's bounds.
 
